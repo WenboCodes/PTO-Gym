@@ -30,6 +30,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     src = [(9.0, 90), (7.0, 70), (8.0, 80), (6.0, 60)]
+    # Exhausted mode stops after emitting the only valid proposal. The
+    # remaining output slots are not architecturally produced and are ignored by
+    # compare.py.
     golden = [(9.0, 90), (0.0, 0), (0.0, 0), (0.0, 0)]
 
     write_pairs(out / "v1.bin", src)

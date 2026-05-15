@@ -97,24 +97,24 @@ void LaunchTSELS_f16_uint32_2x16_2x8_2x16_2x16(uint32_t *mask, uint16_t *src, ui
     TSELS_f16_uint32_2x16_2x8_2x16_2x16<<<1, nullptr, stream>>>((__gm__ uint32_t *)mask, (__gm__ uint16_t *)src, (__gm__ uint16_t *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint8_2x8_2x32_2x8_2x8(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint8_2x8_2x32_2x8_2x8(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint8_2x8_2x32_2x8_2x8(uint8_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint8_2x8_2x32_2x8_2x8<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint16_2x8_2x16_2x8_2x8(__gm__ uint16_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint16_2x8_2x16_2x8_2x8(__gm__ uint16_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint16_2x8_2x16_2x8_2x8(uint16_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint16_2x8_2x16_2x8_2x8<<<1, nullptr, stream>>>((__gm__ uint16_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint32_2x8_2x8_2x8_2x8(__gm__ uint32_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint32_2x8_2x8_2x8_2x8(__gm__ uint32_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint32_2x8_2x8_2x8_2x8(uint32_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint32_2x8_2x8_2x8_2x8<<<1, nullptr, stream>>>((__gm__ uint32_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }
 
@@ -132,10 +132,10 @@ void LaunchTSELS_uint16_uint8_2x32_2x64_2x128_2x31(uint8_t *mask, uint16_t *src,
     TSELS_uint16_uint8_2x32_2x64_2x128_2x31<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ uint16_t *)src, (__gm__ uint16_t *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint8_2x32_2x64_2x128_2x31(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint8_2x32_2x64_2x128_2x31(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint8_2x32_2x64_2x128_2x31(uint8_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint8_2x32_2x64_2x128_2x31<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }
 
@@ -153,16 +153,16 @@ void LaunchTSELS_f16_uint8_32x672_32x96_32x672_32x666(uint8_t *mask, uint16_t *s
     TSELS_f16_uint8_32x672_32x96_32x672_32x666<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ uint16_t *)src, (__gm__ uint16_t *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint8_32x672_32x96_32x672_32x666(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint8_32x672_32x96_32x672_32x666(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint8_32x672_32x96_32x672_32x666(uint8_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint8_32x672_32x96_32x672_32x666<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }
 
-extern "C" __global__ AICORE void TSELS_f32_uint8_1x8192_1x4096_1x8192_1x8192(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, float scalar);
+extern "C" __global__ AICORE void TSELS_f32_uint8_1x8192_1x4096_1x8192_1x8192(__gm__ uint8_t *mask, __gm__ float *src, __gm__ float *dst, uint32_t scalar);
 void LaunchTSELS_f32_uint8_1x8192_1x4096_1x8192_1x8192(uint8_t *mask, float *src, float *dst, void *scalar_ptr, void *stream) {
-    float scalar;
-    std::memcpy(&scalar, scalar_ptr, sizeof(float));
+    uint32_t scalar;
+    std::memcpy(&scalar, scalar_ptr, sizeof(uint32_t));
     TSELS_f32_uint8_1x8192_1x4096_1x8192_1x8192<<<1, nullptr, stream>>>((__gm__ uint8_t *)mask, (__gm__ float *)src, (__gm__ float *)dst, scalar);
 }

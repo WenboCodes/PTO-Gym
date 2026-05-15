@@ -45,11 +45,13 @@ def main() -> None:
     output_values, output_indices = read_pairs("v2.bin")
     golden_counts = read_counts("golden_v3.bin")
     output_counts = read_counts("v3.bin")
+    produced = int(golden_counts.sum())
     ok = (
         golden_values.shape == output_values.shape
         and golden_indices.shape == output_indices.shape
-        and np.allclose(golden_values, output_values)
-        and np.array_equal(golden_indices, output_indices)
+        and 0 <= produced <= PAIR_COUNT
+        and np.allclose(golden_values[:produced], output_values[:produced])
+        and np.array_equal(golden_indices[:produced], output_indices[:produced])
         and np.array_equal(golden_counts, output_counts)
     )
     if not ok:
