@@ -392,9 +392,8 @@ PTO SPEC中sec3–13 的指令按"是否承载逻辑语义"分成三种类。
 | `8`（256 / 32 = 8 sub-groups，bf16 时每组 = 2 VLane） | 对齐 VLane 边界 | `DINTLV_B16`（parity layout 服务后续 fold+vcgmax） | fold → `vcgmax` | `vldsx2 DINTLV_B16` + `vand`×2 + `vmax` + `vcgmax` |
 | `4`（256 / 64 = 4 sub-groups，每组 = 4 VLane） | 对齐 VLane 边界 | `DINTLV_B16` 或 `NORM`（取决于 fold 链长度 vs materialization 成本） | 跨 VLane 组 `vcgmax`，fold 链更长 | `vldsx2` + `vand`×2 + `vmax`×3 + `vcgmax` |
 
-也就是说，**sub-group 的值决定了 reduce axis 与 VLane 边界的对齐关系，从而反向推断出 load 应用的最优 distribution**。当 sub-group 的 lane 数恰好是 `E_v` 的整数倍时，reduce axis 对齐 VLane，pto-as 选择 parity layout 以最大化 `vcg*` 的命中概率；否则落入 Category C 需要物化，load 退回 `NORM`。
+也就是说，**sub-group 的值决定了 reduce axis 与 VLane 边界的对齐关系，从而反向推断出 load 应用的最优 distribution**。当 sub-group 的 lane 数恰好是 `E_v` 的整数倍时，reduce axis 对齐 VLane，pto-as 选择 parity layout 以最大化 `vcg*` 的命中概率；否则落入 Category C 需要转换，load 退回 `NORM`。
 
-> **R4a / R4d 说明**：这两个术语来自 `pto-vmi-requirements.md` 的 R4 — Reduce-combine 规则体系。**R4a**（VLane-aligned group reduce）：当 reduce axis 映射到 32B VLane 边界时，lower 到 `vcgadd/vcgmax/vcgmin`——每 VLane 内独立归约，1 op per physical reg，no materialization。**R4d**（Sub-VLane / unaligned reduce）：当 reduction stride 不对齐 VLane 边界且无 `vcg*` 模式可用时，必须先 `.contiguous()` 物化再 reduce——last resort。完整 R4 规则体系（含 R4b fold-then-reduce、R4c arg-index offset）见 `pto-vmi-requirements.md` Part 3 §R4。
 
 **初步倾向**：建议 **加在 op 上**，原因：
 
