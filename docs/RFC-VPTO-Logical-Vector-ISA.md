@@ -314,11 +314,11 @@ PTO SPEC中sec3–13 的指令按"是否承载逻辑语义"分成三种类。
 
 ---
 
-## 9. ⚠️ 待讨论问题（Open Issues）
+## 9. 待讨论问题（Open Issues）
 
 本节列出当前设计尚未解决的2个关键问题，需要在后续迭代中明确决策。每个问题给出问题本质、影响分析、初步倾向，但不做最终结论。
 
-### 9.1 ⚠️ 256-lane SIMT 编程模型——是否需要 128-lane / 64-lane 选项？
+### 9.1 256-lane SIMT 编程模型——是否需要 128-lane / 64-lane 选项？
 
 **问题**：RFC §3.1 规定 `L * bitwidth(T)` 必须是 256B 的整数倍。大部分 simdvf 代码包含 fp8 / i8 dtype；对于 i8 / fp8，最小合法 `L = 256`（256 × 8bit = 256B），即 vreg 为 `256xi8` 或 `256xfp8`。按照 RFC 的逻辑，所有其他 dtype 的 vreg 也必须对齐到 256 lane 的倍数——`256xfp16`、`256xfp32`。
 
@@ -333,7 +333,7 @@ PTO SPEC中sec3–13 的指令按"是否承载逻辑语义"分成三种类。
 | 物理效率 | 256-lane f32 = 4 物理 reg，每次循环覆盖更多数据，吞吐率可能更高 | 4 物理 reg 的 fan-out 使单次迭代指令数翻倍，是否会引入reg-spill的问题？ |
 
 
-### 9.2 ⚠️ sub-group 概念——vreg 内的分组执行粒度
+### 9.2 sub-group 概念——vreg 内的分组执行粒度
 
 **问题**：由于 §9.1 的推论——所有 vreg 都是 256 lane，对于某些 tile 操作来说 256 lane 太大了。例如一个 128 × 128 的 tile，可能需要把 2 行 pack 进同一个 vreg 来充分利用 vreg 空间（2 × 128 bf16 = 256 bf16 = 2 物理 reg），但对于 reduce 等操作，需要在 vreg 内划分更小的执行粒度——"在每 128 个 lane 的 sub-group 内做 reduce"，而非在整个 256 lane 上。
 
@@ -352,8 +352,53 @@ PTO SPEC中sec3–13 的指令按"是否承载逻辑语义"分成三种类。
 - **vci**（向量-标量交互）：从 sub-group 内提取标量或将标量广播到 sub-group
 - **vld / vst**：已sub-group为单位做strided load/store
 
+**典型场景——MX block-scale exponent reduce**：一个 `!pto.vmi.vreg<256xbf16>` 在逻辑上仍然是连续的 256 个 bf16 元素，但对于 MX 的 32-element block-scale，需要将它切分成 8 个 sub-group（每 32 个 lane 为一组），在每个 sub-group 内做 max-reduce 取 shared exponent。逻辑上用户只想说"对这片数据按 32-element block 取 max exponent"，不关心物理上 DINTLV 解交织、expMask 位提取、VLane 对齐等细节——这些由 pto-as 推导映射到具体的 `pto.mi` 指令组合。
+
+```mlir
+// 用户视角：一个连续 vreg，按 sub-group 做 reduce
+%x      = pto.vmi.vlds %x_ub              : !pto.mi.ptr<bf16,ub> → !pto.vmi.vreg<256xbf16>
+%exp    = pto.vmi.vand %x, %exp_mask       : !pto.vmi.vreg<256xbf16> → !pto.vmi.vreg<256xu16>   // extract exponent field
+%maxe   = pto.vmi.vreduce_max %exp {sub_group=8}
+           : !pto.vmi.vreg<256xu16> → !pto.vmi.vreg<8xu16>       // 每 32 lanes 取 max → 8 个 shared exponent
+%scaleb = pto.vmi.vbr %maxe                : !pto.vmi.vreg<8xu16> → !pto.vmi.vreg<256xu16>       // broadcast 回原 vreg 粒度
+```
+
+**pto-as 推导路径**——从下游 op 的 sub-group 需求反向推断最优 layout：
+
+`pto.vmi.vlds` 本身不携带任何关于 UB 数据物理交织的信息——它只声明"我要从 UB 加载一片连续的 `256xbf16`"。pto-as 无法从这条 load 指令推断出数据在 UB 中是交织存储的，也无法推断出应该用 `DINTLV` 还是 `NORM`。**layout 推断的驱动力来自下游消费者**：
+
+1. **推断起点**：`vreduce_max {sub_group=8}`。这个 op 声明了分组粒度——256 个 u16 切成 8 个 32-lane sub-group，每组取 max。对于 bf16/u16，`E_v = 16`，每个 32B VLane 容纳 16 个 u16。32-lane sub-group = 2 VLane × 16 lanes/VLane = **恰好对齐 VLane 边界**。这让 pto-as 确认：reduce 可以用 Category B 的 `vcgmax`，无需转换。
+
+2. **反向推断最优 layout**：既然 reduce 的最优路径是 `vcgmax`（每个 VLane 内独立取 max），pto-as 需要确保数据在到达 reduce 时已经按 VLane 级别组织好——即**每个 VLane 内的 16 个 u16 正好是同一个 32-element block 的 exponent**。要做到这一点，最省指令的方式是让 load 直接产出 parity 布局（even/odd 拆成 2 个 vreg），然后 vand 各自提取 exponent，最后 vmax fold 成 1 个 vreg——此时 fold 后的 vreg 中每个 VLane 的 16 lanes 恰好覆盖一个 32-element block 的 even+odd max exponent，直接喂给 `vcgmax`。如果 load 用 `NORM` 加载再手动拆分，反而多了一步 layout 变换。因此 **pto-as 从下游 reduce 的需求反向推断：load 应该用 `DINTLV_B16`**。
+
+3. **逐指令 lowering**：
+
+   - `%x = pto.vmi.vlds`：pto-as 根据下游 reduce 的 sub-group 需求，选择 `DINTLV_B16` distribution → lower 到 `pto.vldsx2 "DINTLV_B16"`（一次加载拆成 even/odd 两个物理 vreg：`vdExp0` 和 `vdExp1`）。`%x` 的 layout 含 `parity` 轴。
+
+   - `%exp = pto.vmi.vand`：Category A op，layout 透传。lower 到两条 `pto.mi.vand`（even vreg & `expMaskBF16`, odd vreg & `expMaskBF16`），得到 `vdExpExtract0` 和 `vdExpExtract1`。各自的 parity 轴保留。
+
+   - `%maxe = pto.vmi.vreduce_max {sub_group=8}`：这是推断起点。逻辑上是"256 个 u16 切成 8 个 32-lane sub-group，每组取 max"。pto-as 推导出两个 lowering 步骤：
+     - parity 布局的 even/odd 两个 vreg 用 `pto.mi.vmax` 折叠为 1 个 vreg（`(K-1)× vmax`，将 2 reg → 1 reg）。fold 后 parity 轴消失，但数据已经按 VLane 级别组织——每个 VLane 的 16 lanes 覆盖一个 32-element block 的 max exponent。
+     - `sub_group=8` 对齐 VLane 边界，lower 到 `pto.mi.vcgmax`——每 VLane 内取 max，1 op per physical reg，no cross-reg combine, no materialization。输出 8 个 shared exponent（每 VLane lane 0 一个）。
+
+   - `%scaleb = pto.vmi.vbr`：R6 broadcast reuse——8 个 shared exponent 广播回 256 个 lane，物理 backing 只 1 reg，replicate-read。
+
+4. **关键洞察**：layout 推断不是从 load 向下游"顺流推"，而是从 reduce 的 sub-group 需求向上游"逆流拉"。`pto.vmi.vlds` 只声明了逻辑意图（"加载 256 个连续 bf16"），**具体用什么 distribution token 是 pto-as 为了服务下游 reduce 的最优路径而做出的选择**。这正是 P5 的精神——lowering 是 local instruction-selection search，不是固定 recipe。
+
+**sub-group size 大于 32B**：
+
+| `sub_group` 值 | 与 VLane 关系 | pto-as 推断的最优 load layout | lowering 策略 | 物理指令 |
+|---|---|---|---|---|
+| `8`（256 / 32 = 8 sub-groups，bf16 时每组 = 2 VLane） | 对齐 VLane 边界 | `DINTLV_B16`（parity layout 服务后续 fold+vcgmax） | fold → `vcgmax` | `vldsx2 DINTLV_B16` + `vand`×2 + `vmax` + `vcgmax` |
+| `4`（256 / 64 = 4 sub-groups，每组 = 4 VLane） | 对齐 VLane 边界 | `DINTLV_B16` 或 `NORM`（取决于 fold 链长度 vs materialization 成本） | 跨 VLane 组 `vcgmax`，fold 链更长 | `vldsx2` + `vand`×2 + `vmax`×3 + `vcgmax` |
+
+也就是说，**sub-group 的值决定了 reduce axis 与 VLane 边界的对齐关系，从而反向推断出 load 应用的最优 distribution**。当 sub-group 的 lane 数恰好是 `E_v` 的整数倍时，reduce axis 对齐 VLane，pto-as 选择 parity layout 以最大化 `vcg*` 的命中概率；否则落入 Category C 需要物化，load 退回 `NORM`。
+
+> **R4a / R4d 说明**：这两个术语来自 `pto-vmi-requirements.md` 的 R4 — Reduce-combine 规则体系。**R4a**（VLane-aligned group reduce）：当 reduce axis 映射到 32B VLane 边界时，lower 到 `vcgadd/vcgmax/vcgmin`——每 VLane 内独立归约，1 op per physical reg，no materialization。**R4d**（Sub-VLane / unaligned reduce）：当 reduction stride 不对齐 VLane 边界且无 `vcg*` 模式可用时，必须先 `.contiguous()` 物化再 reduce——last resort。完整 R4 规则体系（含 R4b fold-then-reduce、R4c arg-index offset）见 `pto-vmi-requirements.md` Part 3 §R4。
+
 **初步倾向**：建议 **加在 op 上**，原因：
 
 1. vreg 已经有 layout 属性（编译器持有），再加 sub-group 会让类型系统过于复杂
 2. sub-group 语义本质上是对**操作的分组方式**描述，而非对数据的固有属性描述——同一个 `!pto.vmi.vreg<256xbf16>` 可以在不同 op 中以不同 sub-group 粒度使用
 3. op 属性与现有 A/B/C 分类自然衔接：sub-group 信息可以作为 B 类 op 的模式属性参与 lowering
+4. MX block-scale 场景验证了 op 属性的合理性：同一个 `vreg<256xbf16>` 在 `vreduce_max {sub_group=8}` 中以 32-lane 粒度 reduce，在 `vadd` 中以全 256-lane 粒度运算——分组粒度是 op 的语义，不是 vreg 的固有属性
