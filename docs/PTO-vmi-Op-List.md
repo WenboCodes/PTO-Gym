@@ -332,7 +332,7 @@ pto.vmi.vscatter %v, %dest, %offsets, %mask : !pto.vmi.vreg<64xf32>, !pto.ptr<f3
 %pr = pto.vmi.vprelu %x, %alpha, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<b32> -> !pto.vmi.vreg<64xf32>
 
 // 宽化 32×32→64 乘(产生 width 轴,hi+lo 两 reg)
-%res = pto.vmi.vmull %a, %b, %mask : !pto.vmi.vreg<64xi32>, !pto.vmi.vreg<64xi32>, !pto.vmi.mask<b32> -> !pto.vmi.vreg<32xi64>
+%res = pto.vmi.vmull %a, %b, %mask : !pto.vmi.vreg<64xi32>, !pto.vmi.vreg<64xi32>, !pto.vmi.mask<b32> -> !pto.vmi.vreg<64xi64>
 
 // 融合乘加
 %acc = pto.vmi.vmula %acc, %a, %b, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<b32> -> !pto.vmi.vreg<64xf32>
@@ -351,7 +351,7 @@ pto.vmi.vscatter %v, %dest, %offsets, %mask : !pto.vmi.vreg<64xf32>, !pto.ptr<f3
 | `pge` | gen | — (lane-count 模式 `PAT_VLn`) | `M` (tail) | b8/b16/b32 |
 | `plt` | gen | `s` (i32, 如 `%rem`) | `M` (tail), `s`(next) | b8/b16/b32 |
 
-
+TODO: 双输出考虑一下如何设计。
 示例:
 
 ```mlir
@@ -363,3 +363,5 @@ pto.vmi.vscatter %v, %dest, %offsets, %mask : !pto.vmi.vreg<64xf32>, !pto.ptr<f3
 %mt, %next = pto.vmi.plt %rem : i32 -> !pto.vmi.mask<b32>, i32
 
 ```
+
+TODO:增加vinterleave和vdeinterleave
