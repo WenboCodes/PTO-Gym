@@ -263,10 +263,10 @@ part/width staging + 匹配的 store distribution,并拖出谓词伴随。
 | op (form) | Cat | In | Out | Datatypes |
 |---|---|---|---|---|
 | `vcvt` | B | `V<L×Tn>`, `[pmode]` | `V<L×Tm>` | (i8–i32, f8-f32)↔(i8–i32, f8-f32)|
-| `vbitcast` | A | `V<L×T>` | `V<L×T'>` | 任意bit 重解释,显式,无布局推断|
+| `vinterpret_cast` | A | `V<L×T>` | `V<L×T'>` | 任意bit 重解释,显式,无布局推断|
 
 
-> **`vbitcast`** —— bit 级重解释(`bitcast`)。**不**是 `vcvt`:不产生 parity/width
+> **`vinterpret_cast`** —— bit 级重解释(`bitcast`)。**不**是 `vcvt`:不产生 parity/width
 > 轴、无布局可推断、无 dtype cast 链,只是把同一组 bit 按新 dtype 读出。因此
 > Category 留空、不带 `[pmode]`,刻意保留为显式操作(作者自行保证语义合法)。
 
@@ -283,7 +283,7 @@ part/width staging + 匹配的 store distribution,并拖出谓词伴随。
 %q = pto.vmi.vcvt %s, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.mask<b32> -> !pto.vmi.vreg<64xfp8>
 
 // bit 重解释(显式,不经 vcvt)
-%r = pto.vmi.vbitcast %a : !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xi32>
+%r = pto.vmi.vinterpret_cast %a : !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xi32>
 ```
 
 
