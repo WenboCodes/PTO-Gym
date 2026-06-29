@@ -15,21 +15,24 @@
 | `Ptr<T>` | `!pto.ptr<T,ub>` UB 指针 |
 | `s` | 标量 |
 | `[pmode]` | 可选治理谓词（governing mask），`{pmode = "merge"\|"zero"}`，默认 `zero` |
-| `K` | 一个逻辑 vreg 的物理后备数，`K = L·bitwidth(T) / 2048` |
-| `E_v` | 一个物理 vreg 的 lane 数（f32/i32=64, f16/bf16/i16=128, i8/fp8=256） |
-| BlockLane | 硬件 32B 原子归约单元，vreg = 8 BlockLane；BlockLane 容纳 `32B / bitwidth(T)` 个 lane |
+
+> **物理记号（附录）**：以下记号是 pto.as 内部的物理量，**不**出现在 surface 签名中，仅用于本文档的物理视图与 lowering 说明；surface 用户只需写 `L×T`，`K`/`E_v`/`BlockLane` 由 pto.as 持有。
+>
+> - `K`：一个逻辑 vreg 的物理后备数，`K = L·bitwidth(T) / 2048`（`K_raw < 1` 时按 `K = 1` 处理，见 §1.1）。
+> - `E_v`：一个物理 vreg 的 lane 数（f32/i32 = 64，f16/bf16/i16 = 128，i8/fp8 = 256）。
+> - `BlockLane`：硬件 32B 原子归约单元，每个物理 vreg = 8 个 BlockLane；每个 BlockLane 容纳 `32B / bitwidth(T)` 个 lane。
 
 ### 0.2 Category A/B/C —— 精确 lowering 契约
 
-RFC §5 给了三类定义，这里展开成 pto.as 的可执行判据：
+RFC §5 给了三类定义，这里展开成 pto.as 的可执行判据。三类的本质区分点是**op 是否修改、以及对寄存器 layout 做出何种假定**：
 
-| 类别 | 判据 | pto.as 行为 | 输出 layout |
+| 类别 | 对 layout 的关系 | pto.as 行为 | 输出 layout |
 |---|---|---|---|
-| **A. Native-strided** | 逐 lane、dtype 一致、lane 间独立，输入输出同 dtype 同 `L` | 每 `K` 个物理 reg 各 fan-out 一次该 `pto.mi` op；治理谓词按物理 mask 族逐 reg 配（必要时 `ppack/punpack`） | 与输入相同（layout 透传，含 parity/half 等轴一并透传） |
-| **B. Mode-rewritable** | 存在匹配某条 layout 轴的原生 `pto.mi` 模式 | 沿**其他**轴 fan-out，对匹配轴实例化对应模式（`PART_EVEN/ODD`、`Bin_N0/N1`、`PK/UNPK`、`INTLV/DINTLV`…） | 消费或产生该轴 |
-| **C. Contiguous-required** | 需 stride-1 逻辑访问且无匹配模式（跨 reg 归约/scan、任意 index gather/scatter、跨 reg squeeze） | 先自动插 `.contiguous()` 物化（`INTLV`/`pack`/搬移）把交织轴拍平，再做连续 op | 扁平 chunk（`is_contiguous`） |
+| **A. Layout-passthrough** | **不修改**寄存器 layout（做透传） | 每 `K` 个物理 reg 各 fan-out 一次该 `pto.mi` op；治理谓词按物理 mask 族逐 reg 配（必要时 `ppack/punpack`） | 与输入相同（layout 透传，含 parity/half 等轴一并透传） |
+| **B. Layout-rewritable** | **有规则地修改**寄存器 layout | 沿**其他**轴 fan-out，对匹配轴实例化对应模式（`PART_EVEN/ODD`、`Bin_N0/N1`、`PK/UNPK`、`INTLV/DINTLV`…） | 消费或产生该轴 |
+| **C. Contiguous-required** | **对物理 layout 有强假定**（需 stride-1 连续视图，且无匹配模式可原地满足） | 在该 op **之前**先自动插 `.contiguous()` 物化（`INTLV`/`pack`/搬移）把寄存器 layout 转成 continuous，再做连续 op | 扁平 chunk（`is_contiguous`） |
 
-> A 类的"layout 透传"是 vmi 的核心红利：parity/half 轴上的数据无需解交织即可逐 lane 运算，搬移延迟到真正需要连续视图的 C 类消费者。
+> **C 类的强假定**：C 类 op 无法在任意寄存器 layout 上原地执行，它假定输入已是 continuous。因此 pto.as 在 C 类 op 之前会**显式插入 layout 物化**，把上游的 parity/half/sub_part 等非连续轴拍平成 continuous 再喂给该 op——这是从 A/B 类（可带 layout 运算）跨越到 C 类（强假定连续）的唯一过渡点。
 
 ### 0.3 谓词传播总则
 
