@@ -5,6 +5,22 @@
 ---
 ## Part 0 —— 背景介绍
 
+### 0.0 定位
+
+`pto.vmi`(PTO virtual micro instruction) 是夹在**上层编程模型**(如 TileLang `T.parallel`)与**底层 `pto.mi` 物理 ISA**之间的中间层：它只暴露逻辑连续语义与逐元素计算意图，物理 SIMD 寄存器的 layout(交织/半区/宽窄摆放/part/pack/dist)由 `pto.as` 持有与传播，对用户不可见。完整动机见 [RFC-VPTO-Logical-Vector-ISA.md](RFC-VPTO-Logical-Vector-ISA.md) §1–§2;lane 级语义与 lowering recipe 见 [PTO-vmi-Semantics-and-Lowering.md](PTO-vmi-Semantics-and-Lowering.md)。
+
+```
+TileLang  T.parallel(N) { C[i] = cast<i32>(A[i]) + B[i] }   ← 用户：只有逻辑数据
+   │  (直译，逐元素语义保持)
+   ▼
+pto.vmi      %w = pto.vmi.vcvt %a ; %c = pto.vmi.vadd %w, %b           ← 逻辑向量，layout 由编译器持有
+   │  (pto-as：layout-assignment + lowering)
+   ▼
+pto.mi       vcvt EVEN/ODD + 两路 vadd + vstsx2 INTLV_B32        ← 物理：SIMD 寄存器交织细节
+```
+
+- **上层 → vmi**:`T.parallel` 的逻辑迭代空间几乎一对一直译成 `pto.vmi` 的逻辑向量 op——逐元素计算 → Category A op,`T.cast` → 一条无 `part` 的 `pto.vmi.vcvt`,逻辑长度 `N` → `!pto.vmi.vreg<N×T>`,"全 active" 语义 → 自动补齐的尾部谓词。
+- **vmi → pto.mi**:`pto.as` 做 layout 推断 + 协调 + 连续化,把逻辑向量 lower 成具体 `pto.mi` 指令(含 `part/pack/interleave/dist`)。`K=1` 时退化为零开销直通。
 
 ### 0.1 记号
 
