@@ -1087,13 +1087,13 @@ for (int i = 0; i < N; i++)
 
 ```c
 int K = N / 8;  // elements per VLane
+for (int i = 0; i < N; i++)
+    dst[i] = 0;
 for (int g = 0; g < 8; g++) {
     T sum = 0;
     for (int i = 0; i < K; i++)
         sum += src[g*K + i];
-    dst[g*K] = sum;
-    for (int i = 1; i < K; i++)
-        dst[g*K + i] = 0;
+    dst[g] = sum;
 }
 ```
 
@@ -4592,25 +4592,25 @@ VLane 4: [32..39] VLane 5: [40..47] VLane 6: [48..55] VLane 7: [56..63]
 
 - **syntax:** `%result = pto.vcgadd %input, %mask : !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>`
 - **A5 types:** i16-i32, f16, f32
-- **semantics:** Sum within each VLane. 8 results at indices 0, 8, 16, 24, 32, 40, 48, 56 (for f32).
+- **semantics:** Sum within each VLane. 8 results are written to indices 0..7.
 
 ```c
 int K = N / 8;  // elements per VLane
+for (int i = 0; i < N; i++)
+    dst[i] = 0;
 for (int g = 0; g < 8; g++) {
     T sum = 0;
     for (int i = 0; i < K; i++)
         sum += src[g*K + i];
-    dst[g*K] = sum;
-    for (int i = 1; i < K; i++)
-        dst[g*K + i] = 0;
+    dst[g] = sum;
 }
-// For f32: results at dst[0], dst[8], dst[16], dst[24], dst[32], dst[40], dst[48], dst[56]
+// Results at dst[0]..dst[7]
 ```
 
 - **inputs:** `%input` is the source vector and `%mask` selects participating
   lanes.
 - **outputs:** `%result` contains one sum per 32-byte VLane group, written
-  contiguously into the low slot of each group.
+  contiguously into `%result[0]..%result[7]`. Remaining elements are zero-filled.
 - **constraints and limitations:** This is a per-32-byte VLane-group reduction.
   Inactive lanes are treated as zero.
 
@@ -4624,19 +4624,20 @@ for (int g = 0; g < 8; g++) {
 
 ```c
 int K = N / 8;
+for (int i = 0; i < N; i++)
+    dst[i] = 0;
 for (int g = 0; g < 8; g++) {
     T mx = -INF;
     for (int i = 0; i < K; i++)
         if (src[g*K + i] > mx) mx = src[g*K + i];
-    dst[g*K] = mx;
-    for (int i = 1; i < K; i++)
-        dst[g*K + i] = 0;
+    dst[g] = mx;
 }
 ```
 
 - **inputs:** `%input` is the source vector and `%mask` selects participating
   lanes.
-- **outputs:** `%result` contains one maximum per 32-byte VLane group.
+- **outputs:** `%result` contains one maximum per 32-byte VLane group, written
+  contiguously into `%result[0]..%result[7]`. Remaining elements are zero-filled.
 - **constraints and limitations:** Grouping is by hardware 32-byte VLane, not by
   arbitrary software subvector.
 
@@ -4650,19 +4651,20 @@ for (int g = 0; g < 8; g++) {
 
 ```c
 int K = N / 8;
+for (int i = 0; i < N; i++)
+    dst[i] = 0;
 for (int g = 0; g < 8; g++) {
     T mn = INF;
     for (int i = 0; i < K; i++)
         if (src[g*K + i] < mn) mn = src[g*K + i];
-    dst[g*K] = mn;
-    for (int i = 1; i < K; i++)
-        dst[g*K + i] = 0;
+    dst[g] = mn;
 }
 ```
 
 - **inputs:** `%input` is the source vector and `%mask` selects participating
   lanes.
-- **outputs:** `%result` contains one minimum per 32-byte VLane group.
+- **outputs:** `%result` contains one minimum per 32-byte VLane group, written
+  contiguously into `%result[0]..%result[7]`. Remaining elements are zero-filled.
 - **constraints and limitations:** Grouping is by hardware 32-byte VLane, not by
   arbitrary software subvector.
 
@@ -4706,7 +4708,7 @@ for (int i = 1; i < N; i++)
 
 // Row-wise sum using vcgadd (for 8-row tile)
 %row_sums = pto.vcgadd %tile, %mask : !pto.vreg<64xf32>, !pto.mask<G> -> !pto.vreg<64xf32>
-// Results at indices 0, 8, 16, 24, 32, 40, 48, 56
+// Results at indices 0..7
 
 // Full vector sum for normalization
 %total = pto.vcadd %values, %mask : !pto.vreg<64xf32>, !pto.mask<G> -> !pto.vreg<64xf32>
