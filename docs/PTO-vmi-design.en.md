@@ -7,7 +7,7 @@
 
 ### 0.0 Positioning
 
-`pto.vmi` (PTO virtual micro instruction) is an intermediate layer sitting between the **upper-level programming model** (e.g. TileLang `T.parallel`) and the **low-level `pto.mi` physical ISA**: it exposes only logical-contiguous semantics and per-element computation intent, while the physical SIMD register layout (interleave / half / width-placement / part / pack / dist) is held and propagated by `pto.as` and is invisible to the user. Full motivation is in [RFC-VPTO-Logical-Vector-ISA.md](RFC-VPTO-Logical-Vector-ISA.md) §1–§2; lane-level semantics and lowering recipes are in [PTO-vmi-Semantics-and-Lowering.md](PTO-vmi-Semantics-and-Lowering.md).
+`pto.vmi` (PTO virtual micro instruction) is an intermediate layer sitting between the **upper-level programming model** (e.g. TileLang `T.parallel`) and the **low-level `pto.mi` physical ISA**: it exposes only logical-contiguous semantics and per-element computation intent, while the physical SIMD register layout (interleave / half / width-placement / part / pack / dist) is held and propagated by `pto.as` and is invisible to the user. Full motivation is in [RFC-VPTO-Logical-Vector-ISA.md](RFC-VPTO-Logical-Vector-ISA.md).
 
 ```
 TileLang  T.parallel(N) { C[i] = cast<i32>(A[i]) + B[i] }   ← user: logical data only
@@ -19,7 +19,7 @@ pto.vmi      %w = pto.vmi.vcvt %a ; %c = pto.vmi.vadd %w, %b           ← logic
 pto.mi       vcvt EVEN/ODD + two-way vadd + vstsx2 INTLV_B32        ← physical: SIMD register interleave details
 ```
 
-- **Upper → vmi**: the logical iteration space of `T.parallel` is almost one-to-one translated into `pto.vmi` logical-vector ops — per-element computation → Category A op, `T.cast` → a single `pto.vmi.vcvt` with no `part`, logical length `N` → `!pto.vmi.vreg<N×T>`, the "all-active" semantics → an auto-filled tail predicate.
+- **Upper → vmi**: the logical iteration space of `T.parallel` is translated one-to-one into `pto.vmi` logical-vector ops — per-element computation → Category A op, `T.cast` → a single `pto.vmi.vcvt` with no `part`, logical length `N` → `!pto.vmi.vreg<N×T>`, the "all-active" semantics → an auto-filled tail predicate.
 - **vmi → pto.mi**: `pto.as` performs layout inference + coalescing + contiguization, lowering the logical vector into concrete `pto.mi` instructions (with `part/pack/interleave/dist`). When `K=1` it degenerates to a zero-overhead pass-through.
 
 ### 0.1 Notation
@@ -49,7 +49,6 @@ RFC §5 gives the three-category definition; here it is expanded into executable
 | **B. Layout-rewritable** | **Modifies the register layout by rule** | Fan out along **other** axes; instantiate the matching mode (`PART_EVEN/ODD`, `Bin_N0/N1`, `PK/UNPK`, `INTLV/DINTLV`…) on the matched axis | Consumes or produces that axis |
 | **C. Contiguous-required** | **Strong assumption on physical layout** (requires a stride-1 contiguous view, with no matching mode to satisfy in place) | **Before** the op, auto-insert a `.contiguous()` materialization (`INTLV`/`pack`/move) to convert the register layout to continuous, then perform the contiguous op | Flat chunk (`is_contiguous`) |
 
-> **A's "layout pass-through" is the core dividend of vmi**: data on parity/half axes can be operated on per-lane without de-interleaving; moves are deferred until a Category-C consumer truly needs a contiguous view.
 > **C's strong assumption**: a Category-C op cannot execute in place on an arbitrary register layout — it assumes the input is already continuous. Hence `pto.as` explicitly inserts a layout materialization before the Category-C op, flattening upstream non-contiguous axes (parity/half/sub_part) into continuous before feeding the op. This is the only transition point from A/B (can carry layout) to C (strong contiguity assumption).
 
 ### 0.3 Predicate propagation rules
@@ -296,27 +295,25 @@ reduce/broadcast involves "compact scalar vectors smaller than 256 B" (e.g. `V<2
 
 ## Part 2 —— `group` semantics formalization
 
-> **Decision** (aligning with RFC §9.2 lean + Op-List existing naming): sub-group information is **attached to the op attribute**, named `group`. The same vreg can be used at different `group` granularities in different ops — `V<256×bf16>` is split into 8 sub-group reduces in `vcmax {group=8}`, and operated on at full 256-lane granularity in `vadd`. `group` is **a semantic of the op**, not an intrinsic property of the vreg.
-
 ### 2.1 Definition
 
-For reduce ops (`vcadd`/`vcmax`/`vcmin`) and the broadcast op (`vbrc`), `C` in `{group=C}` denotes the **number of groups (group count)**, not the number of lanes per sub-group:
+For reduce ops (`vcadd`/`vcmax`/`vcmin`) and the broadcast op (`vbrc`), `C` in `{group=C}` denotes the **number of groups (group count)**, not the number of lanes per group:
 
-- **reduce**: split the `L` lanes of `V<L×T>` into **`C` sub-groups**, `L/C` lanes each, each producing 1 compact scalar; output `V<C×T>` (`C` scalars, the low `C` slots valid).
-- **vbrc**: broadcast each of the `C` scalars of the compact input `V<C×T>` back to its own `(L/C)`-lane sub-group, output `V<L×T>`.
+- **reduce**: split the `L` lanes of `V<L×T>` into **`C` groups**, `L/C` lanes each, each producing 1 compact scalar; output `V<C×T>` (`C` scalars, the low `C` slots valid).
+- **vbrc**: broadcast each of the `C` scalars of the compact input `V<C×T>` back to its own `(L/C)`-lane group, output `V<L×T>`.
 
-`C` must divide `L`; the **lanes per sub-group** is `L/C`, whose byte count `W = (L/C)·bitwidth(T)/8` determines the relationship to the BlockLane boundary and thereby the Category.
+`C` must divide `L`; the **lanes per group** is `L/C`, whose byte count `W = (L/C)·bitwidth(T)/8` determines the relationship to the BlockLane boundary and thereby the Category.
 
 **Legal compact vreg types for reduce results**: the reduce output `V<C×T>` is a "compact scalar vector smaller than 256 B" (see §1.3), and `C` may only take **`1 / 2 / 4 / 8`** — i.e. the only legal reduce-result virtual register types are `V<1×T>`, `V<2×T>`, `V<4×T>`, `V<8×T>`. Hence the `C` of the op attribute `{group=C}` must **strictly match** the `C` of the return type `V<C×T>` (`group=8` ⇄ returns `V<8×T>`, `group=4` ⇄ `V<4×T>`, and so on); a mismatch is illegal IR and is rejected by `pto.as` at the type-checking stage.
 
 ### 2.2 `group` → Category decision table
 
-Let `W = (L/C) · bitwidth(T) / 8` (the byte count of one sub-group, `L/C` being the lanes per sub-group), `BlockLane = 32 B`.
+Let `W = (L/C) · bitwidth(T) / 8` (the byte count of one group, `L/C` being the lanes per group), `BlockLane = 32 B`.
 
 | `W` vs BlockLane | Category | pto.as lowering | Physical instruction |
 |---|---|---|---|
-| `W == 32` (sub-group is exactly 1 BlockLane) | **B** | reduce each BlockLane independently, 1 op per physical reg, no cross-reg combine | `vcgadd`/`vcgmax`/`vcgmin` |
-| `W = k·32, k>1` (sub-group spans k BlockLanes, aligned to BlockLane boundary) | **B** (fold + vcg) | first `(k-1)` `vadd/vmax/vmin` to fold k BlockLanes into one BlockLane-wide intermediate, then `vcg*` | `vmax×(k-1)` + `vcg*` |
+| `W == 32` (group is exactly 1 BlockLane) | **B** | reduce each BlockLane independently, 1 op per physical reg, no cross-reg combine | `vcgadd`/`vcgmax`/`vcgmin` |
+| `W = k·32, k>1` (group spans k BlockLanes, aligned to BlockLane boundary) | **B** (fold + vcg) | first `(k-1)` `vadd/vmax/vmin` to fold k BlockLanes into one BlockLane-wide intermediate, then `vcg*` | `vmax×(k-1)` + `vcg*` |
 
 
 ### 2.3 Inactive lanes and argmax of reduce
@@ -330,13 +327,42 @@ Let `W = (L/C) · bitwidth(T) / 8` (the byte count of one sub-group, `L/C` being
 
 ### 2.4 Typical scenario: MX block-scale exponent reduce (bf16, group=8)
 
-`V<256×bf16>` takes a shared exponent, one max per 32-element block → `256/32 = 8` sub-groups, so `group=8` (`256/8 = 32` lanes per sub-group). bf16 `bitwidth=16`, `W=32·16/8=64 B = 2 BlockLane` → falls on the second row of §2.2 (`k=2`, BlockLane-aligned, Category B).
+`V<256×bf16>` takes a shared exponent, one max per 32-element block → `256/32 = 8` groups, so `group=8` (`256/8 = 32` lanes per group). bf16 `bitwidth=16`, `W=32·16/8=64 B = 2 BlockLane` → falls on the second row of §2.2 (`k=2`, BlockLane-aligned, Category B).
 
 - load: `pto.as` reverse-infers from the downstream `group=8` and selects `DINTLV_B16` (parity) so even/odd each become one vreg.
 - `vand` extracts the exponent: Category-A pass-through, each parity vreg `vand`-ed.
 - fold: `(k-1)=1` `vmax` folds the even/odd two vregs into one; the parity axis disappears, and each BlockLane's 16 lanes cover the max exponent of one 32-element block.
 - `vcgmax`: take max per BlockLane → 8 shared exponents (matching `group=8`; the 8 BlockLanes each produce 1, one-to-one).
 - output: compact `V<8×bf16>` (`C=8` shared exponents).
+
+#### 32×32 tile → `V<256×bf16>` placement
+
+A 32×32 bf16 tile has 1024 elements in total, requiring **4 `V<256×bf16>`** (each 256 lanes = 8 rows × 32 cols). It is sliced row-first into four 8-row × 32-col row-slabs, one slab per vreg: lane `n·32 + j` = tile row `row_off + n`, col `j` (`n ∈ 0..7`, `j ∈ 0..31`; `row_off ∈ {0,8,16,24}` for V0~V3).
+
+```text
+                   32×32 bf16 tile
+   col 0                              col 31
+┌──────────────────────────────────────────────┐
+│ row0   c0  c1  c2  ...  c30  c31              │
+│ row1   ...                                   │   ←─ V0 (row 0–7)   8×32=256
+│ ...                                          │
+│ row7   ...                                   │
+├──────────────────────────────────────────────┤
+│ row8   ...                                   │
+│ ...                                          │   ←─ V1 (row 8–15)  8×32=256
+│ row15  ...                                   │
+├──────────────────────────────────────────────┤
+│ row16  ...                                   │   ←─ V2 (row 16–23) 8×32=256
+│ ...                                          │
+│ row23  ...                                   │
+├──────────────────────────────────────────────┤
+│ row24  ...                                   │
+│ ...                                          │   ←─ V3 (row 24–31) 8×32=256
+│ row31  ...                                   │
+└──────────────────────────────────────────────┘
+```
+
+> **Correspondence with the `group=8` reduce**: `group=8` slices 256 lanes into 8 groups of 32 lanes each. Under the 8×32 row-first placement, each 32 lanes is exactly **one complete row** (32 elements). So the 8 groups of one vreg are exactly the 8 rows it holds (row 0–7), and `vcgmax` takes one max per row → 8 shared exponents, one-to-one with the 8 rows — this is precisely the MX block-scale "one shared exponent per 32-element block" semantics (each row of the tile is one 32-element block).
 
 ---
 
@@ -495,7 +521,7 @@ Examples:
 // Ungrouped broadcast: scalar/reduced value fanned out to the whole vreg (in-register, no UB roundtrip)
 %bc = pto.vmi.vbrc %maxe : f32 -> !pto.vmi.vreg<64xf32>
 
-// Grouped broadcast: each of the C=8 scalars fanned back to its own (L/C)=8-lane sub-group (no direct physical instruction; implementation decided by pto.as)
+// Grouped broadcast: each of the C=8 scalars fanned back to its own (L/C)=8-lane group (no direct physical instruction; implementation decided by pto.as)
 %scaleb = pto.vmi.vbrc %maxe {group = 8} : !pto.vmi.vreg<8xf32> -> !pto.vmi.vreg<64xf32>
 ```
 
@@ -519,7 +545,7 @@ Examples:
 // Full-array max reduce (to scalar)
 %mx = pto.vmi.vcmax %x, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64> -> !pto.vmi.vreg<1xf32>
 
-// Sub-group reduce: group=8 → 256 lanes split into 8 groups (32 lanes each), take one max each → 8 compact scalars
+// Group reduce: group=8 → 256 lanes split into 8 groups (32 lanes each), take one max each → 8 compact scalars
 %maxe = pto.vmi.vcmax %exp {group = 8} : !pto.vmi.vreg<256xu16>, !pto.vmi.mask<256> -> !pto.vmi.vreg<8xu16>
 ```
 
@@ -670,4 +696,208 @@ Examples:
 %even, %odd = pto.vmi.vdintlv %x, %y, %mask
     : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64>
       -> !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>
+```
+
+---
+
+## Part 12 —— End-to-end example: Block MX Quant
+
+The same Block MX Quant quantization logic, unfolded top-down across three layers of abstraction: first how TileLang organizes the whole kernel, then how the traditional `pto.mi` exposes hardware details at the vector layer, and finally how `pto.vmi` removes that burden through semantic-level ops.
+
+### 12.1 TileLang layer: the complete kernel algorithm
+
+TileLang organizes the whole block-mx quant kernel — block partitioning, amax reduction, scale generation — then hands the quantization execution path to the layer below:
+
+```python
+# ===========================================================================
+# per_block_cast_kernel: the complete kernel for Block MX Quant
+#   - Grid: (ceil_div(num_tokens, block_m), ceil_div(hidden, block_k))
+#   - Threads: 256
+#   - Each block handles block_m × block_k elements
+#   - On the block_k dimension, 256 elements are processed at a time
+# ===========================================================================
+@T.prim_func
+def per_block_cast_kernel(
+    x: T.Tensor[(num_tokens, hidden), in_config.dtype],          # input: f16 matrix
+    out: T.Tensor[(num_tokens, hidden), out_config.dtype],       # output: fp8 matrix
+    out_sf: T.StridedTensor[sf_shape, (sf_stride, 1), out_config.sf_dtype],  # scale factor
+):
+    with T.Kernel(
+        ceil_div(num_tokens, block_m),   # grid dim 0
+        ceil_div(hidden, block_k),       # grid dim 1
+        threads=num_threads              # 256 threads per block
+    ) as (pid_x, pid_y):
+    ...
+        if:
+            for i, j in T.Parallel(block_m, block_k):
+                out[...] = x_fragment[i, j] * sf_fragment[i // num_per_tokens, j // num_per_channels]  # 3. quantize and write back
+        else:
+          ...
+```
+
+### 12.2 Traditional pto.mi (CCE) style: the algorithm is drowned by physical details
+
+The same quantization main path — given a reciprocal scale, multiply a block of `f16` data by the scale, convert to `fp8`, and write back — when written directly with low-level MI instructions, every physical detail is exposed in the code.
+
+> This handles one 256-element sub-block along the block_k direction in TileLang.
+
+```mlir
+// ===========================================================================
+// Block MX Quant quantization execution path — traditional MI style
+// Processes a num_per_tokens × 256 tile: load f16 → cvt f32 → mul scale → cvt fp8 → store
+// Requires manual handling of all physical details: register splitting, part selection,
+// mask granularity, vor merging, etc.
+// ===========================================================================
+module attributes {pto.backend = "pto", pto.target_arch = "a5"} {
+  func.func @ComputeY1ToFP8_fp16_e4m3_MI(
+      %arg0: i16, %arg1: i16,
+      %arg2: !pto.ptr<f16, ub>,           // xAddr: input f16 data
+      %arg3: !pto.ptr<f16, ub>,           // mxScale1ReciprocalAddr: reciprocal scale
+      %arg4: !pto.ptr<f8E4M3FN, ub>,      // y1Addr: output fp8 data
+      %arg5: i16, %arg6: i16) attributes {pto.kernel} {
+
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %vl_half = arith.index_cast %arg6 : i16 to index
+    %load_stride = arith.muli %vl_half, %c2 : index
+
+    pto.vecscope {
+      // -- load scale: 128 f16, dist mode E2B_B16 --
+      %scale_128 = pto.mi.vlds %arg3[%c0] {dist = "E2B_B16"}
+        : !pto.ptr<f16, ub> -> !pto.mi.vreg<128xf16>
+
+      %mask_b16 = pto.mi.pset_b16 "PAT_ALL" : !pto.mi.mask<b16>   // for f16 conversion
+      %scale_fp32 = pto.mi.vcvt %scale_128, %mask_b16 {part = "EVEN"}
+        : !pto.mi.vreg<128xf16>, !pto.mi.mask<b16> -> !pto.mi.vreg<64xf32>
+      %mask_b32 = pto.mi.pset_b32 "PAT_ALL" : !pto.mi.mask<b32>   // for f32 ops
+      %mask_b8  = pto.mi.pset_b8  "PAT_ALL" : !pto.mi.mask<b8>    // for fp8 write-back
+
+      %block_count = arith.index_cast %arg1 : i16 to index
+      scf.for %i = %c0 to %block_count step %c1 {
+        %offset = arith.muli %i, %load_stride : index
+
+        // (1) load 256 f16 → DINTLV_B16 interleaves into low(128) + high(128)
+        %low, %high = pto.mi.vldsx2 %arg2[%offset], "DINTLV_B16"
+          : !pto.ptr<f16, ub>, index -> !pto.mi.vreg<128xf16>, !pto.mi.vreg<128xf16>
+
+        // (2) f16 → f32: low and high each split EVEN/ODD, becoming 4 vreg<64xf32>
+        %cvt_low_even  = pto.mi.vcvt %low,  %mask_b16 {part = "EVEN"} : ... -> !pto.mi.vreg<64xf32>
+        %cvt_high_even = pto.mi.vcvt %high, %mask_b16 {part = "EVEN"} : ... -> !pto.mi.vreg<64xf32>
+        %cvt_low_odd   = pto.mi.vcvt %low,  %mask_b16 {part = "ODD"}  : ... -> !pto.mi.vreg<64xf32>
+        %cvt_high_odd  = pto.mi.vcvt %high, %mask_b16 {part = "ODD"}  : ... -> !pto.mi.vreg<64xf32>
+
+        // (3) multiply reciprocal scale: 4 independent vmul, one per f32 lane above
+        %mul0 = pto.mi.vmul %cvt_low_even,  %scale_fp32, %mask_b32 : ... -> !pto.mi.vreg<64xf32>
+        %mul1 = pto.mi.vmul %cvt_high_even, %scale_fp32, %mask_b32 : ... -> !pto.mi.vreg<64xf32>
+        %mul2 = pto.mi.vmul %cvt_low_odd,   %scale_fp32, %mask_b32 : ... -> !pto.mi.vreg<64xf32>
+        %mul3 = pto.mi.vmul %cvt_high_odd,  %scale_fp32, %mask_b32 : ... -> !pto.mi.vreg<64xf32>
+
+        // (4) f32 → fp8: 4 vcvt, each packed into the P0/P1/P2/P3 part
+        %p0 = pto.mi.vcvt %mul0, %mask_b32 {part = "P0", rnd = "R", sat = "SAT"} : ... -> !pto.mi.vreg<256xf8E4M3FN>
+        %p1 = pto.mi.vcvt %mul1, %mask_b32 {part = "P1", rnd = "R", sat = "SAT"} : ... -> !pto.mi.vreg<256xf8E4M3FN>
+        %p2 = pto.mi.vcvt %mul2, %mask_b32 {part = "P2", rnd = "R", sat = "SAT"} : ... -> !pto.mi.vreg<256xf8E4M3FN>
+        %p3 = pto.mi.vcvt %mul3, %mask_b32 {part = "P3", rnd = "R", sat = "SAT"} : ... -> !pto.mi.vreg<256xf8E4M3FN>
+
+        // (5) merge: 3 vor splice P0~P3 back into one complete vector
+        %merge01 = pto.mi.vor %p0, %p1, %mask_b8 : ... -> !pto.mi.vreg<256xf8E4M3FN>
+        %merge012 = pto.mi.vor %merge01, %p2, %mask_b8 : ... -> !pto.mi.vreg<256xf8E4M3FN>
+        %merged = pto.mi.vor %merge012, %p3, %mask_b8 : ... -> !pto.mi.vreg<256xf8E4M3FN>
+
+        // (6) write back
+        pto.mi.vsts %merged, %arg4[%offset], %mask_b8
+          : !pto.mi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.mi.mask<b8>
+      }
+    }
+    return
+  }
+}
+```
+
+**Pain points of the traditional pto.mi (CCE) style:**
+
+This layer is no longer describing an algorithm. Every "why" is answered not by "the algorithm needs it" but by "the hardware looks like this":
+
+- A logical vector is split into `low` / `high` because the physical register is only 128 wide
+- `f16 -> f32` distinguishes `EVEN` / `ODD` because the bitwidth halves during type conversion
+- `f32 -> fp8` is distributed across `P0`~`P3`, and each instruction must explicitly carry hardware parameters like `rnd` (rounding mode) and `sat` (saturation overflow); getting them wrong directly causes numerical errors, because fp8 packing must match the hardware part mechanism
+- Multiple parts are spliced back with `vor`, because the earlier steps had to split in the first place
+- From the moment of loading, data is distributed across multiple registers in an interleaved manner (`DINTLV_B16` → low/high → EVEN/ODD); the index stride of the original elements becomes 4, and the developer must keep this mapping in mind at all times to track each element
+- Each operation requires choosing the right mask granularity (`b16` / `b32` / `b8`), because different data types have different bitwidths; a wrong choice is a bug
+
+**The loop body is 17 instructions, of which 12 have nothing to do with the quantization algorithm — they purely describe how the hardware splits and splices data.**
+
+### 12.3 pto.vmi style: write only semantics, not hardware
+
+The same quantization main path — processing a `num_per_tokens × 256` tile — when written with pto.vmi, all physical details are handled automatically by the compiler:
+
+```mlir
+// ===========================================================================
+// Block MX Quant quantization execution path — pto.vmi surface syntax
+// Same num_per_tokens × 256 tile, only 5 semantic actions needed
+// ===========================================================================
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+
+  func.func @ComputeY1ToFP8_fp16_e4m3_VMI(
+      %dataLen: i16,                       // total length of input data
+      %block_count: i16,                    // main-loop iteration count = block_k / 256
+      %xAddr: !pto.ptr<f16, ub>,           // input f16 data address
+      %mxScale1ReciprocalAddr: !pto.ptr<f16, ub>,  // reciprocal scale address
+      %y1Addr: !pto.ptr<f8E4M3FN, ub>,     // output fp8 data address
+      %ubBlockSize: i16,                   // UB block size
+      %vlForHalfNumber: i16)               // vector length of the half number
+      attributes {pto.kernel} {
+
+    // -- constants --
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c256 = arith.constant 256 : index
+    %vl_half = arith.index_cast %vlForHalfNumber : i16 to index
+    %load_stride_y8 = arith.muli %vl_half, %c2 : index
+
+    pto.vecscope {
+      // =====================================================================
+      // Stage 1: load reciprocal scale, broadcast to 256-wide, convert to f32
+      // =====================================================================
+      %scale_f16 = pto.vmi.vload %mxScale1ReciprocalAddr[%c0]
+        : !pto.ptr<f16, ub> -> !pto.vmi.vreg<8xf16>                // load 8 f16 scales
+      %scale_f16_vec = pto.vmi.vbrc %scale_f16 {group = 8}
+        : !pto.vmi.vreg<8xf16> -> !pto.vmi.vreg<256xf16>          // broadcast to 256-wide
+      %scale_fp32 = pto.vmi.vcvt %scale_f16_vec
+        : !pto.vmi.vreg<256xf16> -> !pto.vmi.vreg<256xf32>        // f16 -> f32
+
+      // =====================================================================
+      // Stage 2: per-tile quantization — load f16 → cvt f32 → mul scale → cvt fp8 → store
+      // 256 f16 elements per iteration
+      // =====================================================================
+      %block_count_idx = arith.index_cast %block_count : i16 to index
+      scf.for %i = %c0 to %block_count_idx step %c1 {
+        %x_off = arith.muli %i, %load_stride_y8 : index
+        %y_off = arith.muli %i, %load_stride_y8 : index
+
+        // (1) load one tile of f16 data (256 elements)
+        %x_f16 = pto.vmi.vload %xAddr[%x_off]
+          : !pto.ptr<f16, ub> -> !pto.vmi.vreg<256xf16>
+
+        // (2) f16 -> f32
+        %x_fp32 = pto.vmi.vcvt %x_f16
+          : !pto.vmi.vreg<256xf16> -> !pto.vmi.vreg<256xf32>
+
+        // (3) multiply reciprocal scale
+        %res_fp32 = pto.vmi.vmul %x_fp32, %scale_fp32
+          : !pto.vmi.vreg<256xf32>, !pto.vmi.vreg<256xf32> -> !pto.vmi.vreg<256xf32>
+
+        // (4) f32 -> fp8 (e4m3)
+        %res_fp8 = pto.vmi.vcvt %res_fp32
+          : !pto.vmi.vreg<256xf32> -> !pto.vmi.vreg<256xf8E4M3FN>
+
+        // (5) write back fp8 result
+        pto.vmi.vstore %res_fp8, %y1Addr[%y_off]
+          : !pto.vmi.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.vmi.mask<256>
+      }
+    }
+    return
+  }
+}
 ```
