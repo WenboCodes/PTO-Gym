@@ -95,7 +95,7 @@ Logical vector register. `L` is the logical lane count; `T` is the element type.
 **Common logical ↔ physical mappings:**
 
 | Logical type | Byte size | K | Physical vregs | Valid slots per vreg |
-|---|---:|---:|---:|
+|---|---:|---:|---:|---|
 | `V<256×f32>` | 1024B | 4 | 4 | 64 f32 each, all valid |
 | `V<256×f16>` | 512B | 2 | 2 | 128 f16 each, all valid |
 | `V<256×i8>` | 256B | 1 | 1 | 256 i8, all valid |
@@ -103,26 +103,238 @@ Logical vector register. `L` is the logical lane count; `T` is the element type.
 | `V<64×f16>` | 128B | 1 | 1 | low 64 f16 valid |
 | `V<64×i8>` | 64B | 1 | 1 | low 64 i8 valid |
 
+#### `V<256×f32>`: 4 physical regs (K=4)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x254 │ x255 │
+└────┴────┴────┴─────┴──────┴──────┘
+                  256 lane
+```
+
+**Physical view (contiguous)** - 4 physical regs, each BlockLane = 32B = 8 f32 lanes
+
+```text
+   BL0       BL1               BL7
+┌───────┬───────┬───┬───────┐
+│ x0..7 │ x8..15│...│x56..63│
+└───────┴───────┴───┴───────┘
+            P0 (256B)
+
+   BL0        BL1              BL7
+┌────────┬────────┬───┬─────────┐
+│x64..71 │x72..79 │...│x120..127│
+└────────┴────────┴───┴─────────┘
+            P1 (256B)
+
+   BL0          BL1             BL7
+┌──────────┬──────────┬───┬──────────┐
+│x128..135 │x136..143 │...│x184..191 │
+└──────────┴──────────┴───┴──────────┘
+            P2 (256B)
+
+   BL0          BL1             BL7
+┌──────────┬──────────┬───┬──────────┐
+│x192..199 │x200..207 │...│x248..255 │
+└──────────┴──────────┴───┴──────────┘
+            P3 (256B)
+```
+
+**Physical view (non-contiguous, parity EVEN/ODD)** - even lanes in P0/P2, odd lanes in P1/P3 (typical source: `V<256×f16> -> V<256×f32>` widening preserves parity; all 4 regs carry 64 valid lanes each)
+
+```text
+ P0 (chunk0 EVEN)   P1 (chunk0 ODD)    P2 (chunk1 EVEN)   P3 (chunk1 ODD)
+┌────┬────┬─────┐ ┌────┬────┬─────┐ ┌──────┬──────┬─────┐ ┌──────┬──────┬─────┐
+│ x0 │ x2 │x126 │ │ x1 │ x3 │x127 │ │ x128 │ x130 │x254 │ │ x129 │ x131 │x255 │
+└────┴────┴─────┘ └────┴────┴─────┘ └──────┴──────┴─────┘ └──────┴──────┴─────┘
+    64 lane            64 lane            64 lane            64 lane
+```
+
+> Restore contiguous: `INTLV_B32(P0, P1) -> [x0..x127]`, `INTLV_B32(P2, P3) -> [x128..x255]`, then concatenate in chunk order.
+
+**Physical view (non-contiguous, P0/P1/P2/P3)** - 4-way stride-4 interleave: every 4 logical elements land in one reg each (`x0,x4,...` -> P0; `x1,x5,...` -> P1; `x2,x6,...` -> P2; `x3,x7,...` -> P3); all 4 regs carry 64 valid lanes each (corresponds to the sub_part / part_T 4-way axis)
+
+```text
+   P0                   P1                   P2                   P3
+┌────┬────┬─────┐  ┌────┬────┬─────┐  ┌────┬────┬─────┐  ┌────┬────┬─────┐
+│ x0 │ x4 │x252 │  │ x1 │ x5 │x253 │  │ x2 │ x6 │x254 │  │ x3 │ x7 │x255 │
+└────┴────┴─────┘  └────┴────┴─────┘  └────┴────┴─────┘  └────┴────┴─────┘
+     64 lane              64 lane              64 lane              64 lane
+```
+
+#### `V<256×f16>`: 2 physical regs (K=2)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x254 │ x255 │
+└────┴────┴────┴─────┴──────┴──────┘
+                  256 lane
+```
+
+**Physical view (contiguous)** - 2 physical regs, each BlockLane = 32B = 16 fp16 lanes
+
+```text
+   BL0           BL1               BL7
+┌──────────┬──────────┬───┬───────────┐
+│ x0..x15  │ x16..x31 │...│x112..x127 │
+└──────────┴──────────┴───┴───────────┘
+                  P0 (256B)
+
+   BL0           BL1               BL7
+┌──────────┬──────────┬───┬───────────┐
+│x128..x143│x144..x159│...│x240..x255 │
+└──────────┴──────────┴───┴───────────┘
+                  P1 (256B)
+```
+
+**Physical view (non-contiguous, parity EVEN/ODD)** - even lanes in P0, odd lanes in P1 (e.g. after `DINTLV_B16` load or `vdintlv` preserves parity; both regs carry 128 valid lanes each)
+
+```text
+   P0 (EVEN)                                   P1 (ODD)
+┌────┬────┬────┬─────┬──────┬──────┐  ┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x2 │ x4 │ ... │ x252 │ x254 │  │ x1 │ x3 │ x5 │ ... │ x253 │ x255 │
+└────┴────┴────┴─────┴──────┴──────┘  └────┴────┴────┴─────┴──────┴──────┘
+   128 even lanes valid                     128 odd lanes valid
+```
+
+> Restore contiguous: `INTLV_B16(P0, P1) -> [x0 x1 x2 x3 ... x255]`.
+
+#### `V<256×i8>`: 1 physical reg (K=1)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x254 │ x255 │
+└────┴────┴────┴─────┴──────┴──────┘
+                  256 lane
+```
+
+**Physical view (contiguous)** - 1 physical reg, each BlockLane = 32B = 32 i8 lanes
+
+```text
+   BL0          BL1                  BL7
+┌─────────────┬─────────────┬───┬──────────────┐
+│ x0 ... x31  │ x32 ... x63 │...│x224 ... x255 │
+└─────────────┴─────────────┴───┴──────────────┘
+                   P0 (256B)
+```
+
+#### `V<128×f32>`: 2 physical regs (K=2)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x127 │ x128 │
+└────┴────┴────┴─────┴──────┴──────┘
+                  128 lane
+```
+
+**Physical view (contiguous)** - 2 physical regs, each BlockLane = 32B = 8 f32 lanes
+
+```text
+   BL0       BL1               BL7
+┌───────┬───────┬───┬───────┐
+│ x0..7 │ x8..15│...│x56..63│
+└───────┴───────┴───┴───────┘
+            P0 (256B)
+
+   BL0        BL1              BL7
+┌────────┬────────┬───┬─────────┐
+│x64..71 │x72..79 │...│x120..127│
+└────────┴────────┴───┴─────────┘
+            P1 (256B)
+
+
+**Physical view (non-contiguous, parity EVEN/ODD)** - even lanes in P0, odd lanes in P1
+
+```text
+ P0 (chunk0 EVEN)   P1 (chunk0 ODD) 
+┌────┬────┬─────┐ ┌────┬────┬─────┐
+│ x0 │ x2 │x126 │ │ x1 │ x3 │x127 │
+└────┴────┴─────┘ └────┴────┴─────┘
+    64 lane            64 lane      
+```
+
+#### `V<64×fp16>`: 1 partial physical reg (K=1, low 64 lanes valid)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x62  │ x63  │
+└────┴────┴────┴─────┴──────┴──────┘
+                  64 lane
+```
+
+**Physical view (contiguous)** - 1 physical reg, low 64 lanes valid, each BlockLane = 16 fp16 lanes
+
+```text
+   BL0          BL1         BL2          BL3          BL4   BL5   BL6   BL7
+┌──────────┬──────────┬──────────┬──────────┬──────┬──────┬──────┬──────┐
+│ x0..x15  │ x16..x31 │ x32..x47 │ x48..x63 │      │      │      │      │
+└──────────┴──────────┴──────────┴──────────┴──────┴──────┴──────┴──────┘
+<------------- 128B logical payload -------------><---- 128B outside logical value ---->
+                          P0 (256B)
+```
+
+**Physical view (non-contiguous, part EVEN/ODD)** - single `V<64×fp32> -> V<64×fp16>` narrowing carrier: the 64 valid fp16 sit on even/odd positions of the 128 physical lanes
+
+```text
+   EVEN carrier (phys lanes 0,2,...,126 valid)
+┌────┬───┬────┬───┬─────┬─────┬───┬─────┬───┐
+│ x0 │ _ │ x1 │ _ │ ... │ x62 │ _ │ x63 │ _ │
+└────┴───┴────┴───┴─────┴─────┴───┴─────┴───┘
+```
+
+> Contrast: fp8/i8 `sub_part(P0~P3)` is a byte slot within a 4B group (`[P0 P1 P2 P3] [P0 P1 P2 P3] ...`), a different axis from fp16's part EVEN/ODD; see `V<64×fp8>`.
+
+#### `V<64×fp8>`: 1 partial physical reg (K=1, low 64 lanes valid)
+
+**Logical view**
+
+```text
+┌────┬────┬────┬─────┬──────┬──────┐
+│ x0 │ x1 │ x2 │ ... │ x62  │ x63  │
+└────┴────┴────┴─────┴──────┴──────┘
+                  64 lane
+```
+
+**Physical view (contiguous)** - 1 physical reg, low 64 lanes valid, each BlockLane = 32 fp8 lanes
+
+```text
+      BL0           BL1          BL2   BL3   BL4   BL5   BL6   BL7
+┌─────────────┬─────────────┬──────┬──────┬──────┬──────┬──────┬──────┐
+│ x0 ... x31  │ x32 ... x63 │      │      │      │      │      │      │
+└─────────────┴─────────────┴──────┴──────┴──────┴──────┴──────┴──────┘
+<-- 64B logical payload  --><------- 192B outside logical value ------>
+                          P0 (256B)
+```
+
+**Physical view (non-contiguous, sub_part P0)** - from `V<64×fp32> -> V<64×fp8>` via `vcvt`: instead of placing the low 64B contiguously, the 0th byte of each 4B group holds the valid fp8 (`PK4_B32` extraction target)
+
+```text
+P0: 256B fp8 carrier, viewed as 64 groups × 4B, only the P0 slot is valid per group
+┌────────────┬────────────┬─────┬─────────────┐
+│ x0  _  _  _│ x1  _  _  _│ ... │ x63  _  _  _│
+│ P0 P1 P2 P3│ P0 P1 P2 P3│     │ P0 P1 P2 P3 │
+└────────────┴────────────┴─────┴─────────────┘
+   grp0          grp1              grp63
+```
+
+> This sparse view is a lowering layout that does not change the logical view of `V<64×fp8>`; when `vstore` lowers to `PK4_B32` it extracts accordingly and writes out contiguous 64B fp8.
+
 #### `!pto.vmi.mask<L>`
 
 Virtual predicate mask. Each logical mask lane corresponds to one logical
 vector lane (`L` must match the governed vreg's `L`). Physical backing is
 `K` × 256-bit `!pto.mask<G>` with granularity `G` matching the data element
 width (b32 for f32/i32, b16 for f16/bf16/i16, b8 for i8/fp8).
-
-#### `#pto.vmi.layout`
-
-The layout descriptor is a **compiler-internal attribute** on the VMI type.
-It does not appear in user-authored surface syntax — the user writes only
-`L×T`. `pto.as` fills in the descriptor during layout assignment.
-
-Key layout forms:
-
-| Layout | Meaning |
-|---|---|
-| `#pto.vmi.layout<contiguous>` | Stride-1 mapping across physical regs |
-| `#pto.vmi.layout<deinterleaved = N>` | N-way parity interleave (EVEN/ODD chunks) |
-| `#pto.vmi.layout<num_groups = N, slots = S>` | Group-slot compact vector (reduce output / bcast input) |
 
 ### 1.4 Category A / B / C
 
@@ -187,186 +399,7 @@ type's `C`).
 | `W > 32B`, aligned | B | Fold `(k-1)× vadd/vmax/vmin` then `vcg*` |
 | Unaligned | C | Materialize → contiguous → reduce |
 
-### 1.7 Load/Store `dist-mode`
-
-`vload` and `vstore` accept an optional `{dist_mode = "..."}` attribute
-declaring the memory access pattern. Default is `"continuous"`. Alternatively,
-`{group = C}` selects **group (strided) mode** — mutually exclusive with
-`dist_mode` — for loading/storing `C` rows separated by a per-row `stride`
-(see `vload`/`vstore` op sections).
-
-| `dist-mode` | vload semantics | vstore semantics |
-|---|---|---|
-| `"continuous"` (default) | Contiguous stride-1 load | Contiguous stride-1 store |
-| `"unpack"` | Widening unpack: narrow source expanded to wider lanes | — (store only: no unpack) |
-| `"dintlv"` | Deinterleaved dual load → 2 results `(%even, %odd)` | Interleaved dual store → 2 values `(%even, %odd)` |
-| `"brc"` | Block-broadcast load | — (store only: no broadcast) |
-
-**Group mode** (`{group = C}`, with a `stride` operand): loads/stores `C`
-rows of `L/C` elements each, row `g` at offset `base + g·stride`. Not combinable with `dist_mode` or a mask.
-When `result.L == C` (vload only), each group loads 1 scalar into a slot
-instead — the dual of group reduce.
-
-**Block-stride mode** (`{block_stride = B}`): loads/stores `L` elements in a
-block-strided pattern (block size `B`). Mutually exclusive with `dist_mode` and
-`group`; no `stride` operand. Lowers to a block-strided load/store.
-
-The physical `dist` token suffix (`B8`/`B16`/`B32`) is derived from the UB
-pointer element type by `pto.as`.
-
----
-
-## Part II: Notation Convention
-
-### 2.1 MLIR Op Syntax Patterns
-
-All unified VMI ops follow standard MLIR syntax within the `pto.vmi` dialect.
-
-**Unary (one vector in, one vector out):**
-
-```mlir
-%result = pto.vmi.<op> %source, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-```
-
-**Binary (two vectors in, one vector out):**
-
-```mlir
-%result = pto.vmi.<op> %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-```
-
-**Vec-Scalar (one vector + one scalar + mask in, one vector out):**
-
-```mlir
-%result = pto.vmi.<op> %src, %scalar, %mask : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-```
-
-**Compare (two vectors + seed mask in, mask out):**
-
-```mlir
-%result = pto.vmi.vcmp %lhs, %rhs, %seed {cmp = "lt"} : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.mask<L>
-```
-
-**Load (pointer + offset in, vector out):**
-
-```mlir
-%result = pto.vmi.vload %source[%offset] : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
-```
-
-`dist_mode = "dintlv"` is a fused load + deinterleave and returns 2 results:
-
-```mlir
-%even, %odd = pto.vmi.vload %source[%offset] {dist_mode = "dintlv"}
-    : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
-```
-
-`{group = C}` is strided group load (requires a `stride` operand, no mask):
-
-```mlir
-%result = pto.vmi.vload %source[%offset], %stride {group = C}
-    : !pto.ptr<T, ub>, index -> !pto.vmi.vreg<L×T>
-```
-
-`{block_stride = B}` is block-strided load (no `stride` operand, no mask):
-
-```mlir
-%result = pto.vmi.vload %source[%offset] {block_stride = B}
-    : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
-```
-
-**Store (vector + pointer + offset + mask in):**
-
-```mlir
-pto.vmi.vstore %value, %dest[%offset], %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
-```
-
-`dist_mode = "dintlv"` is a fused interleave + store and consumes 2 values:
-
-```mlir
-pto.vmi.vstore %even, %odd, %dest[%offset], %mask {dist_mode = "dintlv"}
-    : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
-```
-
-`{group = C}` is strided group store (requires `stride`, **no mask**):
-
-```mlir
-pto.vmi.vstore %value, %dest[%offset], %stride {group = C}
-    : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, index
-```
-
-`{block_stride = B}` is block-strided store (no `stride` operand; `mask` optional):
-
-```mlir
-pto.vmi.vstore %value, %dest[%offset], %mask {block_stride = B}
-    : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
-```
-
-**Reduce (vector + mask in, compact vector out):**
-
-```mlir
-%result = pto.vmi.vcadd %source, %mask {group = C} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<C×T>
-```
-
-**Broadcast (scalar or compact in, full vector out):**
-
-```mlir
-%result = pto.vmi.vbrc %value : T -> !pto.vmi.vreg<L×T>
-%result = pto.vmi.vbrc %value {group = C} : !pto.vmi.vreg<C×T> -> !pto.vmi.vreg<L×T>
-```
-
-### 2.2 C-Style Semantics Convention
-
-For each op, semantics are expressed as per-lane C pseudocode:
-
-```c
-// Vector register contents as arrays:
-T dst[L];       // destination
-T src0[L];      // first source
-T src1[L];      // second source (binary ops)
-T scalar;       // scalar operand (vec-scalar ops)
-int mask[L];    // per-lane predicate (0 or 1)
-
-// pmode="zero" (default):
-//   mask[i]==0 → dst[i] = 0
-// pmode="merge":
-//   mask[i]==0 → dst[i] = dst_old[i] (emulated on A5)
-```
-
-### 2.3 Common Attribute Reference
-
-| Attribute | Applies to | Values | Default | Meaning |
-|---|---|---|---|---|
-| `pmode` | All compute ops | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
-| `cmp` | `vcmp`, `vcmps` | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `oeq`, `one`, `olt`, `ole`, `ogt`, `oge`, `slt`, `sle`, `sgt`, `sge` | *(required)* | Comparison predicate |
-| `group` | `vcadd`, `vcmax`, `vcmin` | `1`, `2`, `4`, `8` | `1` (full reduce) | Number of sub-groups |
-| `group` | `vload`, `vstore` | positive integer | *(none)* | Strided group load/store arity; mutually exclusive with `dist_mode`, requires `stride` operand |
-| `block_stride` | `vload`, `vstore` | positive integer | *(none)* | Block-strided load/store block size; mutually exclusive with `dist_mode` and `group` |
-| `group` | `vbrc` | positive integer | *(none)* | Group-slot broadcast arity |
-| `rounding` | `vcvt` (narrowing) | `"A"` (away-from-zero), `"H"` (half-up) | *(none)* | FP narrowing rounding mode |
-| `saturate` | `vcvt` (narrowing) | `"SAT"` | *(none)* | Saturating behavior on overflow |
-| `sign` | `vcvt` (int widening) | `"S"` (signed), `"U"` (unsigned) | *(none)* | Integer extension sign mode |
-| `dist_mode` | `vload`, `vstore` | `"continuous"`, `"unpack"`, `"dintlv"`, `"brc"` | `"continuous"` | Memory access pattern |
-| `order` | `vci` | `"ASC"`, `"DESC"` | `"ASC"` | Index generation direction |
-| `pattern` | `pset`, `pge` | `"PAT_ALL"`, `"PAT_VL" N` | *(required)* | Predicate pattern |
-| `group` | `pset`, `pge` | positive integer | *(none)* | Grouped mask generation arity (all-active / first-N per group); `plt` has no `group` form |
-| `reassoc` | `vcadd` | *(unit attr)* | *(none)* | Permit reassociation (required for fp) |
-
-### 2.4 Operand & Result Type Constraints
-
-| Constraint | Applies to | Rule |
-|---|---|---|
-| **Same L** | Binary compute, vcmp, vsel | `lhs.L == rhs.L == mask.L` |
-| **Same T** | Binary compute, vcmp, vec-scalar | `lhs.T == rhs.T == result.T` (scalar must match element type) |
-| **Mask L = Data L** | All predicated ops | `mask.L == data.L` |
-| **vcvt source/dest** | `vcvt` | `src.L == dst.L`; `src.T` and `dst.T` determine conversion direction |
-| **reduce group** | `vcadd`, `vcmax`, `vcmin` | `C` must divide `L`; `result.L == C` |
-| **vbrc group** | `vbrc {group}` | `input.L == group`; `result.L % group == 0` |
-| **vload/vstore** | `vload`, `vstore` | `result.L` (load) or `value.L` (store) determined by `K × E_v` from pointer type |
-| **vload/vstore group** | `vload`, `vstore` `{group}` | `group` and `dist_mode` mutually exclusive; `group` requires `stride`; vstore group mode forbids `mask` |
-| **vload/vstore block-stride** | `vload`, `vstore` `{block_stride}` | `block_stride` mutually exclusive with `dist_mode` and `group`; vstore allows `mask`, vload does not |
-
----
-
-## Part III: Instruction Reference
+## Part II: Instruction Reference
 
 ### Group Index
 
@@ -388,23 +421,16 @@ int mask[L];    // per-lane predicate (0 or 1)
 
 > **Category:** A (+B on `dintlv`/`unpack`). **Mask:** load none (A5 loads are unpredicated), store `Pg`.
 >
-> `vload`/`vstore` are logical memory ops. The `{dist_mode}` attribute declares
-> the access pattern; physical `dist` tokens (`NORM_B*`, `DINTLV_B*`, etc.) are
-> derived by `pto.as` from the UB pointer element type and are invisible to the
-> user. A5 loads are unpredicated — any logical tail mask migrates to the
-> consuming compute op or store.
->
-> **`dist_mode = "dintlv"` exposes a 2-way split at the surface** — `vload`
-> returns `(%even, %odd)`, `vstore` consumes `(%even, %odd)` — mirroring Group
-> 9's `vdintlv`/`vintlv`. The physical EVEN/ODD *parity* axis is still assigned
-> by `pto.as` at lowering and is invisible to the user; only the semantic 2-way
-> split (e.g. real/imag, value/index) is user-visible.
+> `vload`/`vstore` are logical memory ops. **`[dist_mode]` explicitly declares
+> the access pattern**, defaulting to `continuous` (contiguous); the optional
+> modes are `unpack` (widening unpack), `dintlv` (deinterleave), and `brc`
+> (broadcast).
 
 ### `pto.vmi.vload`
 
 - **syntax:**
   ```mlir
-  %result = pto.vmi.vload %source[%offset] {dist_mode = "continuous"} : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
+  %result = pto.vmi.vload %source[%offset] : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
   ```
 - **syntax (`dintlv`):**
   ```mlir
@@ -458,7 +484,8 @@ int mask[L];    // per-lane predicate (0 or 1)
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior (applied at consumer, not on load) |
 
 - **lowering to `pto.mi`:**
-
+  - **dist-mode** `vload` and `vstore` accept an optional `{dist_mode = "..."}` attribute
+declaring the memory access pattern. Default is `"continuous"`.
   | `dist_mode` | Physical lowering |
   |---|---|
   | `"continuous"` | `K × pto.vlds {dist="NORM"}` (element-width-independent `NORM` load) |
@@ -529,7 +556,7 @@ int mask[L];    // per-lane predicate (0 or 1)
 
 - **syntax:**
   ```mlir
-  pto.vmi.vstore %value, %dest[%offset], %mask {dist_mode = "continuous"} : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
+  pto.vmi.vstore %value, %dest[%offset], %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
   ```
 - **syntax (`dintlv`):**
   ```mlir
@@ -581,7 +608,8 @@ int mask[L];    // per-lane predicate (0 or 1)
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior: `"zero"` (default) stores 0; `"merge"` skips write on inactive lanes |
 
 - **lowering to `pto.mi`:**
-
+  - **dist-mode** `vload` and `vstore` accept an optional `{dist_mode = "..."}` attribute
+declaring the memory access pattern. Default is `"continuous"`.
   | `dist_mode` | Physical lowering |
   |---|---|
   | `"continuous"` | `K × pto.vsts {dist="NORM_B*"}` |
