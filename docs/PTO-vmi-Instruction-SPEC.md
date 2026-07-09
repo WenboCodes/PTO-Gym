@@ -332,9 +332,7 @@ P0: 256B fp8 carrier, viewed as 64 groups × 4B, only the P0 slot is valid per g
 #### `!pto.vmi.mask<L>`
 
 Virtual predicate mask. Each logical mask lane corresponds to one logical
-vector lane (`L` must match the governed vreg's `L`). Physical backing is
-`K` × 256-bit `!pto.mask<G>` with granularity `G` matching the data element
-width (b32 for f32/i32, b16 for f16/bf16/i16, b8 for i8/fp8).
+vector lane (`L` must match the governed vreg's `L`).
 
 ### 1.4 Category A / B / C
 
@@ -450,14 +448,23 @@ type's `C`).
   %result = pto.vmi.vload %source[%offset] {block_stride = B}
       : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
   ```
-- **semantics:** Load `L` logically contiguous elements of type `T` from UB
-  starting at `%source + %offset` (element offset) into a logical vector
-  register.
+- **semantics:** Load elements of type `T` from UB into a logical vector
+  register starting at `%source + %offset` (element offset). The default
+  (`continuous`) is a contiguous stride-1 read:
 
   ```c
   for (int i = 0; i < L; i++)
       dst[i] = ub[base + offset + i];
   ```
+
+  The access pattern is not always contiguous: depending on the attributes
+  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
+  `{block_stride = B}`), the load may instead read in a strided/scattered
+  fashion (e.g. per-row stride for group mode, 32B-block stride for
+  block-stride mode), widen/deinterleave the source, or broadcast. The exact
+  pattern is determined by these mutually exclusive attributes (see
+  attributes and lowering below).
+
 
 - **operands:**
 
@@ -480,7 +487,7 @@ type's `C`).
   |---|---|---|---|
   | `dist_mode` | `"continuous"`, `"unpack"`, `"dintlv"`, `"brc"` | `"continuous"` | Memory access pattern |
   | `group` | positive integer | *(none)* | Strided group load arity; mutually exclusive with `dist_mode`; requires `stride` |
-  | `block_stride` | positive integer | *(none)* | Block-strided load block size; mutually exclusive with `dist_mode` and `group` |
+  | `block_stride` | positive integer | *(none)* | 2D-tile block-strided load: 32B-block stride between scattered blocks; mutually exclusive with `dist_mode` and `group` |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior (applied at consumer, not on load) |
 
 - **lowering to `pto.mi`:**
@@ -504,9 +511,11 @@ declaring the memory access pattern. Default is `"continuous"`.
     folds lanes into slots, slot load reads those slots back into a vreg.
     `C ∈ {1, 2, 4, 8}`. Not combinable with `dist_mode`.
 
-  **Block-stride mode** (`{block_stride = B}`): block-strided load (block size
-  `B`). A5 loads are unpredicated, so an implicit all-active mask is applied.
-  Not combinable with `dist_mode` or `group`.
+  **Block-stride mode** (`{block_stride = B}`): 2D-tile block-strided load.
+  Memory is read in 32B blocks with block `blk` at
+  `base + repeat_stride + blk * block_stride` (scattered access). A5 loads
+  are unpredicated, so an implicit all-active mask is applied. Not combinable
+  with `dist_mode` or `group`.
 
   `B*` suffix is derived from `Ptr<T>` element width: `f32/i32 → B32`, `f16/bf16/i16 → B16`, `i8/fp8 → B8`.
 
@@ -552,6 +561,19 @@ declaring the memory access pattern. Default is `"continuous"`.
   - The `pmode` attribute on `vload` governs the result lane behavior at the
     *consumer*, not on the load itself.
 
+- **attention:**
+  - **Result count must match the access mode.** `dist_mode = "dintlv"` is a
+    fused load + deinterleave and produces **two** results `(%even, %odd)`;
+    all other `dist_mode` values, `{group}`, and `{block_stride}` produce
+    **one** result. If the written result count does not match the selected
+    mode (e.g. a single result with `dintlv`, or two results with
+    `continuous`), `pto.as` rejects the op.
+  - **`{group}`, `{block_stride}`, and `{dist_mode}` are mutually exclusive.**
+    Specifying more than one at once is rejected by `pto.as`.
+  - **`stride` operand is bound to `{group}`.** It is required with
+    `{group = C}` and invalid otherwise; `vload` has no mask operand in any
+    mode (A5 loads are unpredicated).
+
 ### `pto.vmi.vstore`
 
 - **syntax:**
@@ -576,14 +598,24 @@ declaring the memory access pattern. Default is `"continuous"`.
   pto.vmi.vstore %value, %dest[%offset], %mask {block_stride = B}
       : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
   ```
-- **semantics:** Store `L` logically contiguous elements from a vector register
-  to UB. Only lanes where `mask[i] != 0` are written (A5 stores are predicated).
+- **semantics:** Store elements from a vector register to UB starting at
+  `%dest + %offset` (element offset). The default (`continuous`) is a
+  contiguous stride-1 write; only lanes where `mask[i] != 0` are written
+  (A5 stores are predicated):
 
   ```c
   for (int i = 0; i < L; i++)
       if (mask[i])
           ub[base + offset + i] = src[i];
   ```
+
+  The access pattern is not always contiguous: depending on the attributes
+  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
+  `{block_stride = B}`), the store may instead write in a strided/scattered
+  fashion (e.g. per-row stride for group mode, 32B-block stride for
+  block-stride mode) or interleave the values. The exact pattern is
+  determined by these mutually exclusive attributes (see attributes and
+  lowering below).
 
 - **operands:**
 
@@ -604,7 +636,7 @@ declaring the memory access pattern. Default is `"continuous"`.
   |---|---|---|---|
   | `dist_mode` | `"continuous"`, `"dintlv"` | `"continuous"` | Memory access pattern |
   | `group` | positive integer | *(none)* | Strided group store arity; mutually exclusive with `dist_mode`; requires `stride`; forbids `mask` |
-  | `block_stride` | positive integer | *(none)* | Block-strided store block size; mutually exclusive with `dist_mode` and `group` |
+  | `block_stride` | positive integer | *(none)* | 2D-tile block-strided store: 32B-block stride between scattered blocks; mutually exclusive with `dist_mode` and `group` |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior: `"zero"` (default) stores 0; `"merge"` skips write on inactive lanes |
 
 - **lowering to `pto.mi`:**
@@ -618,9 +650,11 @@ declaring the memory access pattern. Default is `"continuous"`.
   **Group mode** (`{group = C}` + `stride`): row-strided tile store. Not combinable with
   `dist_mode` or `mask` (group stores are unpredicated).
 
-  **Block-stride mode** (`{block_stride = B}`): block-strided store (block size
-  `B`). An explicit `mask` is applied; if absent an implicit all-active mask
-  is used. Not combinable with `dist_mode` or `group`.
+  **Block-stride mode** (`{block_stride = B}`): 2D-tile block-strided store.
+  Memory is written in 32B blocks with block `blk` at
+  `base + repeat_stride + blk * block_stride` (scattered access). An explicit
+  `mask` is applied; if absent an implicit all-active mask is used. Not
+  combinable with `dist_mode` or `group`.
 
 - **examples:**
 
@@ -661,7 +695,7 @@ declaring the memory access pattern. Default is `"continuous"`.
   ```mlir
   %result = pto.vmi.vci %base {order = "ASC"} : T -> !pto.vmi.vreg<L×T>
   ```
-- **semantics:** Generate a lane-index vector `[base, base±1, base±2, ...]`.
+- **semantics:** Generate a per-lane index/counter vector from a single scalar base such as `[base, base±1, base±2, ...]`,  lane `i` gets `base + i` (ASC) or `base - i` (DESC). It is the index source for `vgather`/`vscatter` offsets.
 
   ```c
   for (int i = 0; i < L; i++)
@@ -691,6 +725,17 @@ declaring the memory access pattern. Default is `"continuous"`.
   1 × pto.vci {ASC/DESC} per chunk
   ```
   `#mi = 1/chunk`, `dep = 1`.
+
+- **datatypes:** `i8`/`i16`/`i32`, `f16`, `f32`; the result element type also
+  fixes `L` (`i32`/`f32` -> 64, `i16`/`f16` -> 128, `i8` -> 256).
+
+- **example:**
+  ```mlir
+  // Ascending i32 indices for a gather base
+  %idx = pto.vmi.vci %c0 {order = "ASC"} : i32 -> !pto.vmi.vreg<64×i32>
+  // Descending f32 ramp
+  %ramp = pto.vmi.vci %c10 {order = "DESC"} : f32 -> !pto.vmi.vreg<64×f32>
+  ```
 
 - **example:**
   ```mlir
