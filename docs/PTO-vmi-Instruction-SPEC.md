@@ -410,7 +410,7 @@ type's `C`).
 | 5 | **Reduce** | `vcadd`, `vcmax`, `vcmin` | B (VLane-aligned) / C (unaligned) | `Pg req` |
 | 6 | **Convert** | `vcvt`, `vinterpret_cast` | B / A | `Pg` / none |
 | 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vhist) / C (gather/scatter) | `Pg` (`vhist`/SFU) / `Pg` (gather/scatter) |
-| 8 | **Predicate Ops** | `pset`, `pge`, `plt` | gen | gen |
+| 8 | **Predicate Ops** | `create_mask`, `create_group_mask` | gen | gen |
 | 9 | **Data Rearrange** | `vintlv`, `vdintlv` | A | `Pg` |
 
 ---
@@ -802,7 +802,7 @@ declaring the memory access pattern. Default is `"continuous"`.
       : !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>,
         !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>
       -> !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>
-  // → pto.as: 2 × pto.vadd (EVEN/ODD), each with pset_b32 "PAT_ALL" mask
+  // → pto.as: 2 × pto.vadd (EVEN/ODD), each with create_mask all-active mask
 
   // Masked add with merge mode
   %s = pto.vmi.vadd %a, %b, %mask {pmode = "merge"}
@@ -2041,161 +2041,108 @@ or fusing at the `pto.mi` layer is the workaround.
 > **Category:** gen (mask producers — take no input mask).
 > **Mask in:** none (they generate masks).
 >
-> Three ops cover all mask-generation patterns: `pset` (named pattern),
-> `pge` (first-N tail), `plt` (data-dependent tail from scalar remainder).
-> Mask granularity (`b8`/`b16`/`b32`) is derived from the result type, not
-> spelled in the op name.
+> Mask generation is expressed with two ops: `create_mask` (prefix / first-N
+> tail) and `create_group_mask` (grouped prefix / grouped first-N tail). Mask
+> granularity (`b8`/`b16`/`b32`) is derived from the result type, not spelled in
+> the op name.
 >
-> `pset` and `pge` accept an optional `{group = C}` attribute for **grouped**
-> mask generation (all-active / first-N within each of the `C` groups); `plt`
-> has no `group` form (it is a single-chunk data-dependent tail).
+> `create_mask` takes a single `index` operand `active_lanes`. When
+> `active_lanes ≥ L` it yields an all-active mask; when `active_lanes = N < L`
+> it yields a first-N tail mask. `create_group_mask` repeats the first-N pattern
+> within each of `num_groups` equal groups (group size `group_size`).
 
-### `pto.vmi.pset`
+```mlir
+%act  = arith.minsi %rem, %cL   // min(rem, L)
+%aidx = arith.index_cast %act   // i32 -> index
+%mask = pto.vmi.create_mask %aidx : index -> !pto.vmi.mask<128×b32>
+%next = arith.subi %rem, %act   // rem - min(rem, L)
+```
 
-- **semantics:** Create a predicate mask with all lanes active.
-
-  ```c
-  for (int i = 0; i < L; i++)
-      dst[i] = 1;  // PAT_ALL
-  ```
-
-  With `{group = C}`, all lanes are active within each of the `C` equal groups
-  (group size `L/C`); the result carries a `num_groups` layout.
+### `pto.vmi.create_mask`
 
 - **syntax:**
   ```mlir
-  %m = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<L×bG>
+  %m = pto.vmi.create_mask %active_lanes : index -> !pto.vmi.mask<L>
   ```
-- **syntax (`group`):**
-  ```mlir
-  // grouped all-active mask: all lanes active within each of C groups
-  %m = pto.vmi.pset "PAT_ALL" {group = C} : !pto.vmi.mask<L×bG>
-  ```
-- **operands:** *(none)*
-- **results:**
-
-  | Result | Type | Description |
-  |---|---|---|
-  | `result` | `!pto.vmi.mask<L×bG>` | All-active predicate mask |
-
-- **attributes:**
-
-  | Attribute | Values | Description |
-  |---|---|---|
-  | `pattern` | `"PAT_ALL"` | All lanes active |
-  | `group` | positive integer | Grouped all-active mask arity (optional); result becomes a group-slot mask |
-
-- **lowering to `pto.mi`:**
-  ```
-  1 × pto.pge_bG "PAT_ALL" (shared across K regs)
-  ```
-  `#mi = 1`, `dep = 1`. A single `PAT_ALL` mask can be shared across all `K`
-  physical regs.
-
-- **example:**
-  ```mlir
-  %mask = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<128×b32, #pto.vmi.layout<contiguous>>
-  // → pto.as: 2 × pto.pge_b32 "PAT_ALL" (K=2, EVEN/ODD)
-  ```
-
-  ```mlir
-  // Grouped all-active mask: 8 groups
-  %m = pto.vmi.pset "PAT_ALL" {group = 8} : !pto.vmi.mask<256×b32>
-  // → pto.as: grouped mask, all lanes active per group (num_groups = 8)
-  ```
-
-### `pto.vmi.pge`
-
-- **semantics:** Create a tail predicate mask with the first `N` logical lanes
-  active (`PAT_VL<N>`). Remaining lanes are inactive.
+- **semantics:** Create a predicate mask where the first `active_lanes` logical
+  lanes are active and the rest are inactive. `active_lanes ≥ L` produces an
+  all-active mask; `active_lanes = N` produces a first-N tail mask.
 
   ```c
   for (int i = 0; i < L; i++)
-      dst[i] = (i < N) ? 1 : 0;  // PAT_VL<N>
+      dst[i] = (i < active_lanes) ? 1 : 0;
   ```
 
-  With `{group = C}`, the first `N` lanes are active **within each of the `C`
-  groups** (group size `L/C`); first-N active per group.
-
-- **syntax:**
-  ```mlir
-  %m = pto.vmi.pge "PAT_VL16" : !pto.vmi.mask<L×bG>
-  ```
-- **syntax (`group`):**
-  ```mlir
-  // grouped tail mask: first N lanes active within each of C groups
-  %m = pto.vmi.pge "PAT_VLN" {group = C} : !pto.vmi.mask<L×bG>
-  ```
-- **attributes:**
-
-  | Attribute | Values | Description |
-  |---|---|---|
-  | `pattern` | `"PAT_VL<N>"` | First N lanes active |
-  | `group` | positive integer | Grouped tail-mask arity (optional); first-N active per group |
-
-- **lowering to `pto.mi`:**
-  ```
-  1 × pto.pge_bG "PAT_VL<N>" (or split across K regs for larger N)
-  ```
-  `#mi = 1` or `K`, `dep = 1`.
-
-- **example:**
-  ```mlir
-  %tail = pto.vmi.pge "PAT_VL64" : !pto.vmi.mask<128×b32>
-  // → pto.as: pto.pge_b32 "PAT_ALL" + pto.pge_b32 "PAT_ALLF" (K=2, split)
-  ```
-
-  ```mlir
-  // Grouped tail mask: first 25 lanes per group, 8 groups
-  %m = pto.vmi.pge "PAT_VL25" {group = 8} : !pto.vmi.mask<256×b32>
-  // → first 25 lanes active in each of 8 groups (group size 32)
-  ```
-
-### `pto.vmi.plt`
-
-- **semantics:** Data-dependent tail mask from a scalar remainder. Produces a
-  mask where the first `min(rem, L)` lanes are active, and returns the
-  decremented remainder for chaining across chunks.
-
-  ```c
-  int active = min(rem, L);
-  for (int i = 0; i < L; i++)
-      dst[i] = (i < active) ? 1 : 0;
-  next = rem - active;
-  ```
-
-- **syntax:**
-  ```mlir
-  %m, %next = pto.vmi.plt %rem : i32 -> !pto.vmi.mask<L×bG>, i32
-  ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `scalar` | `i32` | Remaining element count |
+  | `active_lanes` | `index` | Number of leading active lanes |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `mask` | `!pto.vmi.mask<L×bG>` | Tail predicate |
-  | `scalar_out` | `i32` | Next-chunk remaining count |
-
-- **lowering to `pto.mi`:**
-  ```
-  1 × pto.plt_bG (+ carry scalar)
-  ```
-  `#mi = 1`, `dep = 1`. +1 preg. Cheap to recompute — prefer recompute over
-  keeping many parity-variant copies alive.
+  | `result` | `!pto.vmi.mask<L>` | Predicate mask |
 
 - **example:**
   ```mlir
-  // 250 elements across 128-lane chunks
-  // Round 1: rem=250 → mask all-active (clamped to 128), next=122
-  // Round 2: rem=122 → mask VL122, next=0
-  %m1, %n1 = pto.vmi.plt %rem : i32 -> !pto.vmi.mask<128×b16>, i32
-  %m2, %n2 = pto.vmi.plt %n1  : i32 -> !pto.vmi.mask<128×b16>, i32
+  // All-active mask (active_lanes >= L)
+  %all = pto.vmi.create_mask %c128 : index -> !pto.vmi.mask<128×b32>
+
+  // First-N tail mask (N = 64)
+  %tail = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<128×b32>
   ```
+
+### `pto.vmi.create_group_mask`
+
+- **syntax:**
+  ```mlir
+  %m = pto.vmi.create_group_mask %active_elems_per_group {num_groups = C, group_size = S}
+      : index -> !pto.vmi.mask<L>
+  ```
+- **semantics:** Create a grouped predicate mask. The mask is divided into
+  `num_groups` equal groups of `group_size` lanes each; lane `i` is active iff
+  `(i % group_size) < active_elems_per_group`. When
+  `active_elems_per_group ≥ group_size` all lanes are active within every group
+  (grouped all-active); otherwise the first `active_elems_per_group` lanes are
+  active within each group (grouped first-N tail).
+
+  ```c
+  for (int i = 0; i < L; i++)
+      dst[i] = ((i % group_size) < active_elems_per_group) ? 1 : 0;
+  ```
+
+- **operands:**
+
+  | Operand | Type | Description |
+  |---|---|---|
+  | `active_elems_per_group` | `index` | Active lanes within each group |
+
+- **attributes:**
+
+  | Attribute | Values | Description |
+  |---|---|---|
+  | `num_groups` | positive integer | Number of equal groups |
+  | `group_size` | positive integer | Lanes per group (`L / num_groups`) |
+
+- **results:**
+
+  | Result | Type | Description |
+  |---|---|---|
+  | `result` | `!pto.vmi.mask<L>` | Grouped predicate mask |
+
+- **example:**
+  ```mlir
+  // Grouped all-active: 8 groups, group size 32, all lanes active per group
+  %all = pto.vmi.create_group_mask %c32 {num_groups = 8, group_size = 32}
+      : index -> !pto.vmi.mask<256×b32>
+
+  // Grouped first-N tail: first 25 lanes per group, 8 groups
+  %tail = pto.vmi.create_group_mask %c25 {num_groups = 8, group_size = 32}
+      : index -> !pto.vmi.mask<256×b32>
+  ```
+
 
 > **Mask Boolean Ops (`vand` / `vor` / `vxor` / `vnot` on masks):**
 >
@@ -2368,11 +2315,10 @@ or fusing at the `pto.mi` layer is the workaround.
 | 45 | `pto.vmi.vgather` | 7: SFU | C | Indexed gather (B32) |
 | 46 | `pto.vmi.vgatherb` | 7: SFU | C | Byte-granularity indexed gather |
 | 47 | `pto.vmi.vscatter` | 7: SFU | C | Indexed scatter |
-| 48 | `pto.vmi.pset` | 8: Predicate | gen | All-active mask |
-| 49 | `pto.vmi.pge` | 8: Predicate | gen | First-N tail mask |
-| 50 | `pto.vmi.plt` | 8: Predicate | gen | Data-dependent tail mask |
-| 51 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
-| 52 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
+| 48 | `pto.vmi.create_mask` | 8: Predicate | gen | Prefix / first-N tail mask |
+| 49 | `pto.vmi.create_group_mask` | 8: Predicate | gen | Grouped predicate mask |
+| 50 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
+| 51 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
 
 ---
 
