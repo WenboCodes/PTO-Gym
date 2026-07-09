@@ -873,7 +873,7 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vneg`
 
-- **semantics:** Elementwise negate.
+- **semantics:** Elementwise negate: `0 - x`.
 
   ```c
   for (int i = 0; i < L; i++)
@@ -937,9 +937,21 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 ### 3.3 Bitwise Ops
 
+> **Mask-operand support (planned):** `vand` / `vor` / `vxor` / `vnot` will be
+> extended to accept **mask** operands in addition to vector registers. When
+> the operands are masks, the op performs a per-lane **predicate boolean**
+> operation (AND / OR / XOR / NOT) on the mask lanes and produces a mask
+> result, rather than an elementwise data bitwise op on a vreg. This reuses the
+> same op names for both vreg-bitwise and mask-boolean forms; the operand type
+> selects the mode. There is no separate predicate-logic op (e.g. `pand`/
+> `por`/`pnot`); mask boolean logic is expressed through these ops.
+
 #### `pto.vmi.vand` / `pto.vmi.vor` / `pto.vmi.vxor`
 
-- **semantics:** Elementwise bitwise AND / OR / XOR.
+- **semantics:** Elementwise bitwise AND / OR / XOR. Operands and result are
+  vregs by default; will also support mask-typed operands, performing a per-lane
+  predicate boolean op and yielding a mask (the data operands themselves are
+  masks, distinct from the governing `mask`).
 
   ```c
   for (int i = 0; i < L; i++)
@@ -959,7 +971,10 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vnot`
 
-- **semantics:** Elementwise bitwise NOT.
+- **semantics:** Elementwise bitwise NOT. Operand and result are vregs by
+  default; will also support a mask-typed operand, performing a per-lane predicate
+  complement and yielding a mask (the data operand itself is a mask, distinct
+  from the governing `mask`).
 
   ```c
   for (int i = 0; i < L; i++)
