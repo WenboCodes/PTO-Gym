@@ -426,6 +426,23 @@ type's `C`).
 
 ### `pto.vmi.vload`
 
+- **semantics:** Load elements of type `T` from UB into a logical vector
+  register starting at `%source + %offset` (element offset). The default
+  (`continuous`) is a contiguous stride-1 read:
+
+  ```c
+  for (int i = 0; i < L; i++)
+      dst[i] = ub[base + offset + i];
+  ```
+
+  The access pattern is not always contiguous: depending on the attributes
+  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
+  `{block_stride = B}`), the load may instead read in a strided/scattered
+  fashion (e.g. per-row stride for group mode, 32B-block stride for
+  block-stride mode), widen/deinterleave the source, or broadcast. The exact
+  pattern is determined by these mutually exclusive attributes (see
+  attributes and lowering below).
+
 - **syntax:**
   ```mlir
   %result = pto.vmi.vload %source[%offset] : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
@@ -448,24 +465,6 @@ type's `C`).
   %result = pto.vmi.vload %source[%offset] {block_stride = B}
       : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
   ```
-- **semantics:** Load elements of type `T` from UB into a logical vector
-  register starting at `%source + %offset` (element offset). The default
-  (`continuous`) is a contiguous stride-1 read:
-
-  ```c
-  for (int i = 0; i < L; i++)
-      dst[i] = ub[base + offset + i];
-  ```
-
-  The access pattern is not always contiguous: depending on the attributes
-  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
-  `{block_stride = B}`), the load may instead read in a strided/scattered
-  fashion (e.g. per-row stride for group mode, 32B-block stride for
-  block-stride mode), widen/deinterleave the source, or broadcast. The exact
-  pattern is determined by these mutually exclusive attributes (see
-  attributes and lowering below).
-
-
 - **operands:**
 
   | Operand | Type | Description |
@@ -576,6 +575,25 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 ### `pto.vmi.vstore`
 
+- **semantics:** Store elements from a vector register to UB starting at
+  `%dest + %offset` (element offset). The default (`continuous`) is a
+  contiguous stride-1 write; only lanes where `mask[i] != 0` are written
+  (A5 stores are predicated):
+
+  ```c
+  for (int i = 0; i < L; i++)
+      if (mask[i])
+          ub[base + offset + i] = src[i];
+  ```
+
+  The access pattern is not always contiguous: depending on the attributes
+  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
+  `{block_stride = B}`), the store may instead write in a strided/scattered
+  fashion (e.g. per-row stride for group mode, 32B-block stride for
+  block-stride mode) or interleave the values. The exact pattern is
+  determined by these mutually exclusive attributes (see attributes and
+  lowering below).
+
 - **syntax:**
   ```mlir
   pto.vmi.vstore %value, %dest[%offset], %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
@@ -598,25 +616,6 @@ declaring the memory access pattern. Default is `"continuous"`.
   pto.vmi.vstore %value, %dest[%offset], %mask {block_stride = B}
       : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
   ```
-- **semantics:** Store elements from a vector register to UB starting at
-  `%dest + %offset` (element offset). The default (`continuous`) is a
-  contiguous stride-1 write; only lanes where `mask[i] != 0` are written
-  (A5 stores are predicated):
-
-  ```c
-  for (int i = 0; i < L; i++)
-      if (mask[i])
-          ub[base + offset + i] = src[i];
-  ```
-
-  The access pattern is not always contiguous: depending on the attributes
-  (`{dist_mode}`, `{group = C}` with a `stride` operand, or
-  `{block_stride = B}`), the store may instead write in a strided/scattered
-  fashion (e.g. per-row stride for group mode, 32B-block stride for
-  block-stride mode) or interleave the values. The exact pattern is
-  determined by these mutually exclusive attributes (see attributes and
-  lowering below).
-
 - **operands:**
 
  | Operand | Type | Description |
@@ -691,10 +690,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 ### `pto.vmi.vci`
 
-- **syntax:**
-  ```mlir
-  %result = pto.vmi.vci %base {order = "ASC"} : T -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Generate a per-lane index/counter vector from a single scalar base such as `[base, base±1, base±2, ...]`,  lane `i` gets `base + i` (ASC) or `base - i` (DESC). It is the index source for `vgather`/`vscatter` offsets.
 
   ```c
@@ -702,6 +697,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = base + (order == "ASC" ? i : -i);
   ```
 
+- **syntax:**
+  ```mlir
+  %result = pto.vmi.vci %base {order = "ASC"} : T -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -758,10 +757,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vadd` / `pto.vmi.vsub` / `pto.vmi.vmul`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vadd %lhs, %rhs, %mask {pmode = "zero"} : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Unified fp/int elementwise add / subtract / multiply.
 
   ```c
@@ -769,6 +764,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? lhs[i] + rhs[i] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vadd %lhs, %rhs, %mask {pmode = "zero"} : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -812,10 +811,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vdiv`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vdiv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise floating-point divide.
 
   ```c
@@ -823,6 +818,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? lhs[i] / rhs[i] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vdiv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `f16`, `f32` only
 - **lowering to `pto.mi`:**
   ```
@@ -832,10 +831,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vmax` / `pto.vmi.vmin`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vmax %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise maximum / minimum (unified fp/int).
 
   ```c
@@ -843,6 +838,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? max(lhs[i], rhs[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vmax %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
 - **lowering to `pto.mi`:**
   ```
@@ -854,10 +853,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vabs`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vabs %src, %mask {pmode = "zero"} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise absolute value (unified fp/int).
 
   ```c
@@ -865,6 +860,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? abs(src[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vabs %src, %mask {pmode = "zero"} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
 - **lowering to `pto.mi`:**
   ```
@@ -874,10 +873,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vneg`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vneg %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise negate.
 
   ```c
@@ -885,6 +880,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? -src[i] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vneg %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
 - **lowering to `pto.mi`:**
   ```
@@ -894,10 +893,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vrelu`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vrelu %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise ReLU: `max(0, x)`.
 
   ```c
@@ -905,6 +900,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? max(0, src[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vrelu %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
 - **lowering to `pto.mi`:**
   ```
@@ -914,10 +913,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vexp` / `pto.vmi.vln` / `pto.vmi.vsqrt`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vexp %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise transcendental: exponential, natural logarithm, square root.
 
   ```c
@@ -929,6 +924,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? sqrt(src[i]) : (pmode_merge ? dst_old[i] : 0);  // vsqrt
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vexp %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `f16`, `f32` only
 - **lowering to `pto.mi`:**
   ```
@@ -940,10 +939,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vand` / `pto.vmi.vor` / `pto.vmi.vxor`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vand %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise bitwise AND / OR / XOR.
 
   ```c
@@ -951,6 +946,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? (lhs[i] & rhs[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vand %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32` (integer bitwise)
 - **lowering to `pto.mi`:**
   ```
@@ -960,10 +959,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vnot`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vnot %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise bitwise NOT.
 
   ```c
@@ -971,6 +966,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? ~src[i] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vnot %src, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`
 - **lowering to `pto.mi`:**
   ```
@@ -982,10 +981,6 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 #### `pto.vmi.vshl` / `pto.vmi.vshr`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vshl %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise left shift (`vshl`) or unsigned right shift (`vshr`). The shift count is per-lane from `rhs`.
 
   ```c
@@ -995,6 +990,10 @@ declaring the memory access pattern. Default is `"continuous"`.
       dst[i] = mask[i] ? (lhs[i] >> rhs[i]) : (pmode_merge ? dst_old[i] : 0);  // vshr (unsigned)
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vshl %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`
 - **lowering to `pto.mi`:**
   ```
@@ -1009,10 +1008,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vadds` / `pto.vmi.vmuls` / `pto.vmi.vmaxs` / `pto.vmi.vmins`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vadds %src, %scalar, %mask {pmode = "merge"} : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise vector-scalar add / multiply / max / min.
 
   ```c
@@ -1020,6 +1015,10 @@ scalar type must match the vector element type.
       dst[i] = mask[i] ? src[i] + scalar : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vadds %src, %scalar, %mask {pmode = "merge"} : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1049,10 +1048,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vshls` / `pto.vmi.vshrs`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vshls %src, %scalar, %mask : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Elementwise vector-scalar shift.
 
   ```c
@@ -1062,6 +1057,10 @@ scalar type must match the vector element type.
       dst[i] = mask[i] ? (src[i] >> scalar) : (pmode_merge ? dst_old[i] : 0);  // vshrs
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vshls %src, %scalar, %mask : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`
 - **lowering to `pto.mi`:**
   ```
@@ -1073,10 +1072,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vcmp`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vcmp %lhs, %rhs, %seed {cmp = "lt"} : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.mask<L>
-  ```
 - **semantics:** Elementwise compare → predicate mask. The `seed` mask is the
   governing predicate `Pg`: where `seed[i] = 0` the result lane is 0 (zeroing);
   where `seed[i] = 1` the comparison is evaluated.
@@ -1086,6 +1081,10 @@ scalar type must match the vector element type.
       dst[i] = seed[i] ? cmp(lhs[i], rhs[i]) : 0;
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vcmp %lhs, %rhs, %seed {cmp = "lt"} : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.mask<L>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1138,10 +1137,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vcmps`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vcmps %src, %scalar, %seed {cmp = "ge"} : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.mask<L>
-  ```
 - **semantics:** Elementwise vector-scalar compare → predicate mask.
 
   ```c
@@ -1149,6 +1144,10 @@ scalar type must match the vector element type.
       dst[i] = seed[i] ? cmp(src[i], scalar) : 0;
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vcmps %src, %scalar, %seed {cmp = "ge"} : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.mask<L>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1179,10 +1178,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vsel`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vsel %mask, %true_val, %false_val {pmode = "zero"} : !pto.vmi.mask<L>, !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Per-lane selection driven by a predicate mask.
 
   ```c
@@ -1190,6 +1185,10 @@ scalar type must match the vector element type.
       dst[i] = mask[i] ? true_val[i] : false_val[i];
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vsel %mask, %true_val, %false_val {pmode = "zero"} : !pto.vmi.mask<L>, !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1226,10 +1225,6 @@ scalar type must match the vector element type.
 
 #### `pto.vmi.vselr`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vselr %source, %index : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×index_T> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Dynamic lane permutation: `result[i] = source[index[i]]`.
 
   ```c
@@ -1237,6 +1232,10 @@ scalar type must match the vector element type.
       dst[i] = src[index[i]];
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vselr %source, %index : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×index_T> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1291,17 +1290,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vbrc`
 
-- **syntax:**
-  ```mlir
-  // Ungrouped: scalar → full vector
-  %r = pto.vmi.vbrc %scalar : f32 -> !pto.vmi.vreg<64×f32>
-
-  // Ungrouped: 1-lane vreg → full vector
-  %r = pto.vmi.vbrc %val : !pto.vmi.vreg<1×f32> -> !pto.vmi.vreg<256×f32>
-
-  // Grouped: compact group-slot → dense vector
-  %r = pto.vmi.vbrc %source {group = 128} : !pto.vmi.vreg<128×f32> -> !pto.vmi.vreg<1024×f32>
-  ```
 - **semantics:** Broadcast a scalar or group-slot compact value across lanes.
 
   **Ungrouped:** One value replicated to all `L` lanes.
@@ -1319,6 +1307,17 @@ or fusing at the `pto.mi` layer is the workaround.
           dst[g * gs + i] = src[g];
   ```
 
+- **syntax:**
+  ```mlir
+  // Ungrouped: scalar → full vector
+  %r = pto.vmi.vbrc %scalar : f32 -> !pto.vmi.vreg<64×f32>
+
+  // Ungrouped: 1-lane vreg → full vector
+  %r = pto.vmi.vbrc %val : !pto.vmi.vreg<1×f32> -> !pto.vmi.vreg<256×f32>
+
+  // Grouped: compact group-slot → dense vector
+  %r = pto.vmi.vbrc %source {group = 128} : !pto.vmi.vreg<128×f32> -> !pto.vmi.vreg<1024×f32>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1385,10 +1384,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vcadd`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vcadd %src, %mask {group = C, reassoc} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<C×T>
-  ```
 - **semantics:** Masked add-reduction. When `{group=C}` is absent, reduces all
   `L` active lanes to a single scalar (`V<1×T>`).
 
@@ -1409,6 +1404,10 @@ or fusing at the `pto.mi` layer is the workaround.
   }
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vcadd %src, %mask {group = C, reassoc} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<C×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1454,10 +1453,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vcmax` / `pto.vmi.vcmin`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vcmax %src, %mask {group = C} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<C×T>
-  ```
 - **semantics:** Masked max/min reduction.
 
   ```c
@@ -1474,6 +1469,10 @@ or fusing at the `pto.mi` layer is the workaround.
   dst[0] = best;
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vcmax %src, %mask {group = C} : !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<C×T>
+  ```
 - **operands:** Same as `vcadd` (without `reassoc`).
 - **results:** Same as `vcadd`.
 - **attributes:** `group`, `pmode` (same as `vcadd`, no `reassoc`).
@@ -1510,10 +1509,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vcvt`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vcvt %src {rounding = "H", sign = "U"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
-  ```
 - **semantics:** Unified elementwise type conversion. The conversion direction
   is derived from source and destination element types:
 
@@ -1526,6 +1521,10 @@ or fusing at the `pto.mi` layer is the workaround.
   | int → int, `\|dst\| > \|src\|` | Integer extension | `extsi` / `extui` |
   | int → int, `\|dst\| < \|src\|` | Saturating integer truncation | `trunci` |
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vcvt %src {rounding = "H", sign = "U"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1590,10 +1589,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vinterpret_cast`
 
-- **syntax:**
-  ```mlir
-  %r = pto.vmi.vinterpret_cast %src : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
-  ```
 - **semantics:** Bitwise reinterpretation of a vector register — same bits,
   different element type. No data movement, no layout change.
 
@@ -1602,6 +1597,10 @@ or fusing at the `pto.mi` layer is the workaround.
   memcpy(&dst, &src, L * sizeof(T_src));
   ```
 
+- **syntax:**
+  ```mlir
+  %r = pto.vmi.vinterpret_cast %src : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1649,10 +1648,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vexpdif`
 
-- **syntax:**
-  ```mlir
-  %e = pto.vmi.vexpdif %x, %max, %mask : !pto.vmi.vreg<L×T_x>, !pto.vmi.vreg<L×f32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×f32>
-  ```
 - **semantics:** Fused `exp(x − max)` for softmax numerical stability. Single
   hardware instruction.
 
@@ -1661,6 +1656,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? exp(x[i] - max[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %e = pto.vmi.vexpdif %x, %max, %mask : !pto.vmi.vreg<L×T_x>, !pto.vmi.vreg<L×f32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×f32>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1692,10 +1691,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vaxpy`
 
-- **syntax:**
-  ```mlir
-  %y = pto.vmi.vaxpy %x, %acc, %alpha, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Fused `α·x + y` (scale-add). Single hardware instruction.
 
   ```c
@@ -1703,6 +1698,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? (alpha * x[i] + acc[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %y = pto.vmi.vaxpy %x, %acc, %alpha, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1727,10 +1726,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vlrelu`
 
-- **syntax:**
-  ```mlir
-  %y = pto.vmi.vlrelu %x, %slope, %mask : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Leaky ReLU: `y = x > 0 ? x : slope × x`. The slope is a
   scalar shared across all lanes.
 
@@ -1739,6 +1734,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? (src[i] > 0 ? src[i] : slope * src[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %y = pto.vmi.vlrelu %x, %slope, %mask : !pto.vmi.vreg<L×T>, T, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1756,10 +1755,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vprelu`
 
-- **syntax:**
-  ```mlir
-  %y = pto.vmi.vprelu %x, %alpha, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Parametric ReLU: `y = max(x, 0) + alpha × min(x, 0)`. The
   `alpha` is a per-lane parameter vector (not a shared scalar).
 
@@ -1768,6 +1763,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? (max(src[i], 0) + alpha[i] * min(src[i], 0)) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %y = pto.vmi.vprelu %x, %alpha, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1785,10 +1784,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vmull`
 
-- **syntax:**
-  ```mlir
-  %res = pto.vmi.vmull %a, %b, %mask : !pto.vmi.vreg<L×i32>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i64>
-  ```
 - **semantics:** Widening 32-bit × 32-bit → 64-bit multiply. The result
   occupies two physical registers (hi + lo) accessed through a virtual `width`
   axis.
@@ -1798,6 +1793,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? (int64_t)a[i] * (int64_t)b[i] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %res = pto.vmi.vmull %a, %b, %mask : !pto.vmi.vreg<L×i32>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i64>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1823,10 +1822,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vmula`
 
-- **syntax:**
-  ```mlir
-  %acc1 = pto.vmi.vmula %acc, %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Fused multiply-add: `acc = acc + lhs × rhs`. Single hardware
   instruction. The accumulator is both an input and output (writes back).
 
@@ -1835,6 +1830,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? (acc[i] + lhs[i] * rhs[i]) : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %acc1 = pto.vmi.vmula %acc, %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1862,10 +1861,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vhist`
 
-- **syntax:**
-  ```mlir
-  %h = pto.vmi.vhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
-  ```
 - **semantics:** Histogram bin count. The `{mode}` attribute selects the
   histogram kind:
   - `{mode = "chist"}` (default): **channel histogram** — the existing
@@ -1886,6 +1881,10 @@ or fusing at the `pto.mi` layer is the workaround.
   // dst carries Bin_N0 (bins 0–127) and Bin_N1 (bins 128–255) on a half axis
   ```
 
+- **syntax:**
+  ```mlir
+  %h = pto.vmi.vhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1931,10 +1930,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vgather`
 
-- **syntax:**
-  ```mlir
-  %g = pto.vmi.vgather %src, %offsets, %mask : !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Indexed gather from UB at B32 granularity. For each active
   lane `i`, load `src[offsets[i]]`.
 
@@ -1943,6 +1938,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? ub[base + offsets[i]] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %g = pto.vmi.vgather %src, %offsets, %mask : !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -1962,10 +1961,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vgatherb`
 
-- **syntax:**
-  ```mlir
-  %gb = pto.vmi.vgatherb %src, %offsets, %mask : !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Byte-granularity indexed gather. Mask lane count equals result
   lane count (may differ from offset lane count).
 
@@ -1974,6 +1969,10 @@ or fusing at the `pto.mi` layer is the workaround.
       dst[i] = mask[i] ? ub_byte[base_byte + offsets[i]] : (pmode_merge ? dst_old[i] : 0);
   ```
 
+- **syntax:**
+  ```mlir
+  %gb = pto.vmi.vgatherb %src, %offsets, %mask : !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>
+  ```
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
 - **lowering to `pto.mi`:**
   ```
@@ -1983,10 +1982,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vscatter`
 
-- **syntax:**
-  ```mlir
-  pto.vmi.vscatter %value, %dest, %offsets, %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L>
-  ```
 - **semantics:** Indexed scatter to UB. For each active lane `i`,
   write `value[i]` to `dest[offsets[i]]`.
 
@@ -1996,6 +1991,10 @@ or fusing at the `pto.mi` layer is the workaround.
           ub[base + offsets[i]] = value[i];
   ```
 
+- **syntax:**
+  ```mlir
+  pto.vmi.vscatter %value, %dest, %offsets, %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -2038,15 +2037,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.pset`
 
-- **syntax:**
-  ```mlir
-  %m = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<L×bG>
-  ```
-- **syntax (`group`):**
-  ```mlir
-  // grouped all-active mask: all lanes active within each of C groups
-  %m = pto.vmi.pset "PAT_ALL" {group = C} : !pto.vmi.mask<L×bG>
-  ```
 - **semantics:** Create a predicate mask with all lanes active.
 
   ```c
@@ -2057,6 +2047,15 @@ or fusing at the `pto.mi` layer is the workaround.
   With `{group = C}`, all lanes are active within each of the `C` equal groups
   (group size `L/C`); the result carries a `num_groups` layout.
 
+- **syntax:**
+  ```mlir
+  %m = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<L×bG>
+  ```
+- **syntax (`group`):**
+  ```mlir
+  // grouped all-active mask: all lanes active within each of C groups
+  %m = pto.vmi.pset "PAT_ALL" {group = C} : !pto.vmi.mask<L×bG>
+  ```
 - **operands:** *(none)*
 - **results:**
 
@@ -2092,15 +2091,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.pge`
 
-- **syntax:**
-  ```mlir
-  %m = pto.vmi.pge "PAT_VL16" : !pto.vmi.mask<L×bG>
-  ```
-- **syntax (`group`):**
-  ```mlir
-  // grouped tail mask: first N lanes active within each of C groups
-  %m = pto.vmi.pge "PAT_VLN" {group = C} : !pto.vmi.mask<L×bG>
-  ```
 - **semantics:** Create a tail predicate mask with the first `N` logical lanes
   active (`PAT_VL<N>`). Remaining lanes are inactive.
 
@@ -2112,6 +2102,15 @@ or fusing at the `pto.mi` layer is the workaround.
   With `{group = C}`, the first `N` lanes are active **within each of the `C`
   groups** (group size `L/C`); first-N active per group.
 
+- **syntax:**
+  ```mlir
+  %m = pto.vmi.pge "PAT_VL16" : !pto.vmi.mask<L×bG>
+  ```
+- **syntax (`group`):**
+  ```mlir
+  // grouped tail mask: first N lanes active within each of C groups
+  %m = pto.vmi.pge "PAT_VLN" {group = C} : !pto.vmi.mask<L×bG>
+  ```
 - **attributes:**
 
   | Attribute | Values | Description |
@@ -2139,10 +2138,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.plt`
 
-- **syntax:**
-  ```mlir
-  %m, %next = pto.vmi.plt %rem : i32 -> !pto.vmi.mask<L×bG>, i32
-  ```
 - **semantics:** Data-dependent tail mask from a scalar remainder. Produces a
   mask where the first `min(rem, L)` lanes are active, and returns the
   decremented remainder for chaining across chunks.
@@ -2154,6 +2149,10 @@ or fusing at the `pto.mi` layer is the workaround.
   next = rem - active;
   ```
 
+- **syntax:**
+  ```mlir
+  %m, %next = pto.vmi.plt %rem : i32 -> !pto.vmi.mask<L×bG>, i32
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -2206,10 +2205,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vintlv`
 
-- **syntax:**
-  ```mlir
-  %lo, %hi = pto.vmi.vintlv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Interleave two source vectors by even/odd lanes.
 
   ```c
@@ -2223,6 +2218,10 @@ or fusing at the `pto.mi` layer is the workaround.
   }
   ```
 
+- **syntax:**
+  ```mlir
+  %lo, %hi = pto.vmi.vintlv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
+  ```
 - **operands:**
 
   | Operand | Type | Description |
@@ -2255,10 +2254,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### `pto.vmi.vdintlv`
 
-- **syntax:**
-  ```mlir
-  %even, %odd = pto.vmi.vdintlv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
-  ```
 - **semantics:** Deinterleave a paired-source by even/odd lanes (AoS → SoA).
 
   ```c
@@ -2278,6 +2273,10 @@ or fusing at the `pto.mi` layer is the workaround.
   }
   ```
 
+- **syntax:**
+  ```mlir
+  %even, %odd = pto.vmi.vdintlv %lhs, %rhs, %mask : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
+  ```
 - **operands:** Same shape as `vintlv`.
 - **results:** Same shape as `vintlv` (two `!pto.vmi.vreg<L×T>`).
 - **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
