@@ -1536,12 +1536,12 @@ or fusing at the `pto.mi` layer is the workaround.
   | fp → fp, `\|dst\| < \|src\|` | Floating-point narrowing | `truncf` |
   | fp → int | Float to signed integer | `fptosi` |
   | int → fp | Signed integer to float | `sitofp` |
-  | int → int, `\|dst\| > \|src\|` | Integer extension | `extsi` / `extui` |
+  | int -> int, `\|dst\| > \|src\|` | Integer extension (sign from source element type) | `extsi` / `extui` |
   | int → int, `\|dst\| < \|src\|` | Saturating integer truncation | `trunci` |
 
 - **syntax:**
   ```mlir
-  %r = pto.vmi.vcvt %src {rounding = "H", sign = "U"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
+  %r = pto.vmi.vcvt %src {rounding = "H"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
   ```
 - **operands:**
 
@@ -1561,7 +1561,6 @@ or fusing at the `pto.mi` layer is the workaround.
   |---|---|---|---|
   | `rounding` | `"A"` (away-from-zero), `"H"` (half-up) | fp narrowing | Rounding mode |
   | `saturate` | `"SAT"` | any narrowing | Saturating on overflow |
-  | `sign` | `"S"` (signed), `"U"` (unsigned) | int widening (when source is signless) | Extension sign mode |
   | `pmode` | `"zero"`, `"merge"` | all | Inactive-lane behavior |
 
 - **datatypes:** Source and destination from `{f32, f16, bf16, fp8_e4m3, fp8_e5m2, i32, i16, i8, ui32, ui16, ui8}`
@@ -1587,9 +1586,9 @@ or fusing at the `pto.mi` layer is the workaround.
   %n = pto.vmi.vcvt %y {rounding = "H"}
       : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×f16>
 
-  // i8 → i16 unsigned extension
-  %z = pto.vmi.vcvt %a {sign = "U"}
-      : !pto.vmi.vreg<256×i8> -> !pto.vmi.vreg<256×i16>
+  // ui8 -> i16 unsigned extension
+  %z = pto.vmi.vcvt %a
+      : !pto.vmi.vreg<256×ui8> -> !pto.vmi.vreg<256×i16>
 
   // f32 → fp8 quantized narrow
   %q = pto.vmi.vcvt %s
@@ -1599,6 +1598,7 @@ or fusing at the `pto.mi` layer is the workaround.
 - **notes:**
   - `vcvt` **does not change lane count** — `src.L == dst.L` always. The
     physical register count `K` changes because `bitwidth(T)` changes.
+  - Integer signedness is determined by the **element type**.
   - The `part`/`parity`/`width` axes are lowering-only; the user never writes
     `EVEN`/`ODD`/`P0..P3`.
   - Radix-4 (8↔32) is **not** a stacked predicate chain and **not** a UB
