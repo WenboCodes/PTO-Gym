@@ -249,7 +249,7 @@ Logical vector register. `L` is the logical lane count; `T` is the element type.
 │x64..71 │x72..79 │...│x120..127│
 └────────┴────────┴───┴─────────┘
             P1 (256B)
-
+```
 
 **Physical view (non-contiguous, parity EVEN/ODD)** - even lanes in P0, odd lanes in P1
 
