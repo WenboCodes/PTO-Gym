@@ -1847,36 +1847,48 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vchist`
 
-- **semantics:** **Cumulative histogram** — the existing `chistv2`
-  semantics. Counts per-bin occurrences over a bin-index vector and produces
-  a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through the result's
-  width axis.
+- **semantics:** **Cumulative histogram** over unsigned 8-bit source lanes.
+  Counts per-bin occurrences over `%src` on top of a carry-in accumulator
+  `%acc`, producing a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through
+  the result's width axis. Full-form output is 256-bin (Bin_N0 + Bin_N1); if
+  the source range is known to be `< 128`, the result may be a 128-bin
+  Bin_N0-only vector.
 
   ```c
   // Hardware chistv2: two halves (Bin_N0, Bin_N1), 256 bins total
-  uint16_t bins[256] = {0};
+  uint16_t bins[256];
+  for (int b = 0; b < 256; b++) bins[b] = acc[b];   // carry-in
   for (int i = 0; i < L; i++)
       if (mask[i])
-          bins[bin_idx[i]]++;
+          bins[src[i]]++;
   // dst carries Bin_N0 (bins 0–127) and Bin_N1 (bins 128–255) on a half axis
   ```
 
 - **syntax:**
   ```mlir
-  %h = pto.vmi.vchist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  // output is Bin_N0 + Bin_N1
+  %h = pto.vmi.vchist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
+
+  // output is Bin_N0 when the source lanes are known to be < 128
+  %h = pto.vmi.vchist %acc, %src, %mask
+      : !pto.vmi.vreg<128×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×i16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `bin_idx` | `!pto.vmi.vreg<L×i8>` | Per-lane bin index (unsigned 8-bit) |
+  | `acc`  | `!pto.vmi.vreg<L×T_count>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only) |
+  | `src`  | `!pto.vmi.vreg<L×i8>` | Source lanes to be binned (unsigned 8-bit) |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Bin counts (half axis: Bin_N0/N1 pair) |
+  | `result` | `!pto.vmi.vreg<L×T_count>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only) |
 
 - **attributes:**
 
@@ -1892,42 +1904,53 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **example:**
   ```mlir
-  // Cumulative histogram, half-axis Bin_N0/Bin_N1
-  %h = pto.vmi.vchist %bin_idx, %mask
-      : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
+  // Cumulative histogram, full 256-bin (Bin_N0 + Bin_N1) output
+  %h = pto.vmi.vchist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   // → pto.as: Bin_N0 + Bin_N1 fanout → INTLV merge on vstore
+
+  // Bin_N0-only 128-bin output (source lanes known to be < 128)
+  %h0 = pto.vmi.vchist %acc0, %src, %mask
+      : !pto.vmi.vreg<128×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×i16>
   ```
 
 #### `pto.vmi.vdhist`
 
-- **semantics:** **Distribution histogram** — count per bin over a
-  value/index vector, yielding a plain per-bin count vector (no `half`
+- **semantics:** **Distribution histogram** over unsigned 8-bit source
+  lanes. Counts per-bin occurrences over `%src` on top of a carry-in
+  accumulator `%acc`, yielding a plain per-bin count vector (no `half`
   axis).
 
   ```c
   // Plain per-bin distribution count
-  uint16_t bins[N] = {0};
+  uint16_t bins[N];
+  for (int b = 0; b < N; b++) bins[b] = acc[b];     // carry-in
   for (int i = 0; i < L; i++)
       if (mask[i])
-          bins[bin_idx[i]]++;
+          bins[src[i]]++;
   ```
 
 - **syntax:**
   ```mlir
-  %d = pto.vmi.vdhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  %d = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<L×i16>, !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L>
+     -> !pto.vmi.vreg<L×i16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `bin_idx` | `!pto.vmi.vreg<L×i8>` | Per-lane bin index (unsigned 8-bit) |
+  | `acc`  | `!pto.vmi.vreg<L×T_count>` | Carry-in accumulator; same shape as `result` |
+  | `src`  | `!pto.vmi.vreg<L×i8>` | Source lanes to be binned (unsigned 8-bit) |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector |
+  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector on top of `acc` |
 
 - **attributes:**
 
@@ -1944,8 +1967,9 @@ or fusing at the `pto.mi` layer is the workaround.
 - **example:**
   ```mlir
   // Distribution histogram, plain per-bin count
-  %d = pto.vmi.vdhist %bin_idx, %mask
-      : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
+  %d = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   ```
 
 ### 7.3 Gather / Scatter
