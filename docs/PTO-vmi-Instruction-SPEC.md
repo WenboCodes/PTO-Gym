@@ -403,13 +403,13 @@ type's `C`).
 
 | # | Group | Ops | Category | Mask |
 |---|---|---|---|---|
-| 1 | **Load / Store** | `vload`, `vstore` | A (+B on dintlv/unpack) | load: none; store: `Pg` |
+| 1 | **Load / Store** | `vload`, `vstore` | A (+B on unpack) | load: none; store: `Pg` |
 | 2 | **Index-gen** | `vci` | A | none |
 | 3 | **Eltwise Compute** | `vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vabs`, `vneg`, `vrelu`, `vexp`, `vln`, `vsqrt`, `vand`, `vor`, `vxor`, `vnot`, `vshl`, `vshr`, `vadds`, `vmuls`, `vmaxs`, `vmins`, `vshls`, `vshrs`, `vcmp`, `vcmps`, `vsel`, `vselr` | A | `Pg` (except `vselr`: none) |
 | 4 | **Broadcast** | `vbrc` | A (ungrouped) / B (grouped) | none |
 | 5 | **Reduce** | `vcadd`, `vcmax`, `vcmin` | B (VLane-aligned) / C (unaligned) | `Pg req` |
 | 6 | **Convert** | `vcvt`, `vinterpret_cast` | B / A | `Pg` / none |
-| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vhist) / C (gather/scatter) | `Pg` (`vhist`/SFU) / `Pg` (gather/scatter) |
+| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vchist`, `vdhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vchist, vdhist) / C (gather/scatter) | `Pg` (`vchist`/`vdhist`/SFU) / `Pg` (gather/scatter) |
 | 8 | **Predicate Ops** | `create_mask`, `create_group_mask` | gen | gen |
 | 9 | **Data Rearrange** | `vintlv`, `vdintlv` | A | `Pg` |
 
@@ -417,12 +417,11 @@ type's `C`).
 
 ## Group 1: Load / Store
 
-> **Category:** A (+B on `dintlv`/`unpack`). **Mask:** load none (A5 loads are unpredicated), store `Pg`.
+> **Category:** A (+B on `unpack`). **Mask:** load none (A5 loads are unpredicated), store `Pg`.
 >
 > `vload`/`vstore` are logical memory ops. **`[dist_mode]` explicitly declares
 > the access pattern**, defaulting to `continuous` (contiguous); the optional
-> modes are `unpack` (widening unpack), `dintlv` (deinterleave), and `brc`
-> (broadcast).
+> modes are `unpack` (widening unpack) and `brc` (broadcast).
 
 ### `pto.vmi.vload`
 
@@ -439,19 +438,13 @@ type's `C`).
   (`{dist_mode}`, `{group = C}` with a `stride` operand, or
   `%block_stride`), the load may instead read in a strided/scattered
   fashion (e.g. per-row stride for group mode, 32B-block stride for
-  block-stride mode), widen/deinterleave the source, or broadcast. The exact
-  pattern is determined by these mutually exclusive attributes (see
-  attributes and lowering below).
+  block-stride mode), widen the source, or broadcast. The exact pattern is
+  determined by these mutually exclusive attributes (see attributes and
+  lowering below).
 
 - **syntax:**
   ```mlir
   %result = pto.vmi.vload %source[%offset] : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>
-  ```
-- **syntax (`dintlv`):**
-  ```mlir
-  // fused load + deinterleave → 2 results
-  %even, %odd = pto.vmi.vload %source[%offset] {dist_mode = "dintlv"}
-      : !pto.ptr<T, ub> -> !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>
   ```
 - **syntax (`group`):**
   ```mlir
@@ -472,20 +465,19 @@ type's `C`).
   | `source` | `!pto.ptr<T, ub>` | UB base pointer |
   | `offset` | `index` | Element offset from base |
   | `stride` | `index` | Per-row stride (element units); required with `{group}`, invalid otherwise |
-  | `block_stride` | `i16` | 32B-block stride between scattered blocks (block-stride mode); mutually exclusive with `{group}` and `{dist_mode}` |
+  | `block_stride` | `i16` | 32B-block stride between scattered blocks (block-stride mode); mutually exclusive with `{group}` |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T>` | Loaded logical vector (1 result: `continuous`/`unpack`/`brc`) |
-  | `even`, `odd` | two `!pto.vmi.vreg<L×T>` | Deinterleaved pair (2 results, `dintlv` only) |
+  | `result` | `!pto.vmi.vreg<L×T>` | Loaded logical vector |
 
 - **attributes:**
 
   | Attribute | Values | Default | Description |
   |---|---|---|---|
-  | `dist_mode` | `"continuous"`, `"unpack"`, `"dintlv"`, `"brc"` | `"continuous"` | Memory access pattern |
+  | `dist_mode` | `"continuous"`, `"unpack"`, `"brc"` | `"continuous"` | Memory access pattern |
   | `group` | positive integer | *(none)* | Strided group load arity; mutually exclusive with `dist_mode`; requires `stride` |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior (applied at consumer, not on load) |
 
@@ -496,7 +488,6 @@ declaring the memory access pattern. Default is `"continuous"`.
   |---|---|
   | `"continuous"` | `K × pto.vlds {dist="NORM"}` (element-width-independent `NORM` load) |
   | `"unpack"` | `K × pto.vlds {dist="UNPK_B*"}` (widening unpack; suffix from `Ptr<T>`) |
-  | `"dintlv"` | `K × pto.vldsx2 {dist="DINTLV_B*"}` (dual deinterleave load); surface: 2 results `(%even, %odd)`, one per parity half |
   | `"brc"` | `1 × pto.vlds {dist="BRC_B*"}` or `BRC_BLK`; broadcast-axis (1-reg backing, replicate-read) |
 
   **Group mode** (`{group = C}` + `stride`) has two sub-cases, decided by the
@@ -545,29 +536,19 @@ declaring the memory access pattern. Default is `"continuous"`.
   // Widening unpack load: narrow source expanded to wide lanes
   %u = pto.vmi.vload %ub[%offset] {dist_mode = "unpack"} : !pto.ptr<bf16, ub> -> !pto.vmi.vreg<64×f32>
   // → pto.as: Ptr<bf16> → B16, dist_mode=unpack → pto.mi.vlds {dist="UNPK_B16"}
-
-  // Deinterleave load: fused load + deinterleave, 2 surface results
-  %even, %odd = pto.vmi.vload %ub[%offset] {dist_mode = "dintlv"}
-      : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64×f32>, !pto.vmi.vreg<64×f32>
-  // → pto.as: Ptr<f32> → B32, dist_mode=dintlv → pto.vldsx2 {dist="DINTLV_B32"}
   ```
 
 - **notes:**
   - **A5 loads are unpredicated.** A tail mask associated with a `vload` is
     never lowered as a masked load. It migrates to the consuming compute op or
     to a `vstore`.
-  - `dist_mode` and layout inference are orthogonal: even with `dist_mode="continuous"`,
-    `pto.as` may lower to `DINTLV_B*` to serve a downstream grouped reduce.
+  - `dist_mode` and layout inference are orthogonal: `pto.as` may still
+    rewrite the physical layout of a `continuous` load to serve a downstream
+    consumer (e.g. a grouped reduce).
   - The `pmode` attribute on `vload` governs the result lane behavior at the
     *consumer*, not on the load itself.
 
 - **attention:**
-  - **Result count must match the access mode.** `dist_mode = "dintlv"` is a
-    fused load + deinterleave and produces **two** results `(%even, %odd)`;
-    all other `dist_mode` values, `{group}`, and `%block_stride` produce
-    **one** result. If the written result count does not match the selected
-    mode (e.g. a single result with `dintlv`, or two results with
-    `continuous`), `pto.as` rejects the op.
   - **`{group}`, `%block_stride`, and `{dist_mode}` are mutually exclusive.**
     Specifying more than one at once is rejected by `pto.as`.
   - **`stride` operand is bound to `{group}`.** It is required with
@@ -592,19 +573,12 @@ declaring the memory access pattern. Default is `"continuous"`.
   (`{dist_mode}`, `{group = C}` with a `stride` operand, or
   `%block_stride`), the store may instead write in a strided/scattered
   fashion (e.g. per-row stride for group mode, 32B-block stride for
-  block-stride mode) or interleave the values. The exact pattern is
-  determined by these mutually exclusive attributes (see attributes and
-  lowering below).
+  block-stride mode). The exact pattern is determined by these mutually
+  exclusive attributes (see attributes and lowering below).
 
 - **syntax:**
   ```mlir
   pto.vmi.vstore %value, %dest[%offset], %mask : !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
-  ```
-- **syntax (`dintlv`):**
-  ```mlir
-  // fused interleave + store → 2 values
-  pto.vmi.vstore %even, %odd, %dest[%offset], %mask {dist_mode = "dintlv"}
-      : !pto.vmi.vreg<L×T>, !pto.vmi.vreg<L×T>, !pto.ptr<T, ub>, !pto.vmi.mask<L>
   ```
 - **syntax (`group`):**
   ```mlir
@@ -622,12 +596,11 @@ declaring the memory access pattern. Default is `"continuous"`.
 
  | Operand | Type | Description |
  |---|---|---|
-  | `value` | `!pto.vmi.vreg<L×T>` | Vector value to store (1 value, `continuous`) |
- | `even`, `odd` | two `!pto.vmi.vreg<L×T>` | Interleaved pair to store (`dintlv` only) |
+  | `value` | `!pto.vmi.vreg<L×T>` | Vector value to store |
   | `dest` | `!pto.ptr<T, ub>` | UB destination base pointer |
   | `offset` | `index` | Element offset from base |
   | `stride` | `index` | Per-row stride (element units); required with `{group}`, invalid otherwise |
-  | `block_stride` | `i16` | 32B-block stride between scattered blocks (block-stride mode); mutually exclusive with `{group}` and `{dist_mode}` |
+  | `block_stride` | `i16` | 32B-block stride between scattered blocks (block-stride mode); mutually exclusive with `{group}` |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate (variadic: 0 or 1) |
 
 - **results:** *(none)*
@@ -636,7 +609,7 @@ declaring the memory access pattern. Default is `"continuous"`.
 
   | Attribute | Values | Default | Description |
   |---|---|---|---|
-  | `dist_mode` | `"continuous"`, `"dintlv"` | `"continuous"` | Memory access pattern |
+  | `dist_mode` | `"continuous"` | `"continuous"` | Memory access pattern |
   | `group` | positive integer | *(none)* | Strided group store arity; mutually exclusive with `dist_mode`; requires `stride`; forbids `mask` |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior: `"zero"` (default) stores 0; `"merge"` skips write on inactive lanes |
 
@@ -646,7 +619,6 @@ declaring the memory access pattern. Default is `"continuous"`.
   | `dist_mode` | Physical lowering |
   |---|---|
   | `"continuous"` | `K × pto.vsts {dist="NORM_B*"}` |
-  | `"dintlv"` | `K × pto.vstsx2 {dist="INTLV_B*"}`; surface consumes 2 inputs `(%even, %odd)`, interleaved at lowering |
 
   **Group mode** (`{group = C}` + `stride`): row-strided tile store. Not combinable with
   `dist_mode` or `mask` (group stores are unpredicated).
@@ -664,11 +636,6 @@ declaring the memory access pattern. Default is `"continuous"`.
   // Continuous store (default): vreg → UB, masked
   pto.vmi.vstore %v, %ub_out[%offset], %mask : !pto.vmi.vreg<64×f32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64>
   // → pto.as: Ptr<f32> → B32, dist_mode=continuous → pto.mi.vsts {dist="NORM_B32"}
-
-  // Interleave store: fused interleave + store, 2 surface inputs
-  pto.vmi.vstore %even, %odd, %ub_out[%offset], %mask {dist_mode = "dintlv"}
-      : !pto.vmi.vreg<64×f32>, !pto.vmi.vreg<64×f32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64>
-  // → pto.as: Ptr<f32> → B32, dist_mode=dintlv → pto.vstsx2 {dist="INTLV_B32"}
   ```
 
   ```mlir
@@ -1655,12 +1622,13 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ## Group 7: SFU
 
-> **Category:** A (fused arithmetic), B (`vhist`, `vmull`), C (gather/scatter).
+> **Category:** A (fused arithmetic), B (`vchist`, `vdhist`, `vmull`), C (gather/scatter).
 > **Mask:** `Pg` on all except sort-like ops.
 >
-> Special-function / domain-accelerator ops. Mixed categories: `vhist` produces
-> a `half` axis (B); gather/scatter are Category C tile/permute ops; fused
-> activation/arithmetic ops are Category A `vreg→vreg`.
+> Special-function / domain-accelerator ops. Mixed categories: `vchist`
+> produces a `half` axis (B); `vdhist` yields a plain per-bin count (B);
+> gather/scatter are Category C tile/permute ops; fused activation/arithmetic
+> ops are Category A `vreg→vreg`.
 
 ### 7.1 Fused Arithmetic
 
@@ -1877,18 +1845,12 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### 7.2 Histogram
 
-#### `pto.vmi.vhist`
+#### `pto.vmi.vchist`
 
-- **semantics:** Histogram bin count. The `{mode}` attribute selects the
-  histogram kind:
-  - `{mode = "chist"}` (default): **channel histogram** — the existing
-    `chistv2` semantics. Counts per-bin occurrences over a channel-index
-    vector, producing a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible
-    through the result's width axis.
-  - `{mode = "dhist"}`: **distribution histogram** — count per bin over a
-    value/index vector, yielding a plain per-bin count vector (no half axis).
-  Both modes share the same operand/result shapes; `mode` only switches the
-  binning strategy and result layout.
+- **semantics:** **Cumulative histogram** — the existing `chistv2`
+  semantics. Counts per-bin occurrences over a bin-index vector and produces
+  a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through the result's
+  width axis.
 
   ```c
   // Hardware chistv2: two halves (Bin_N0, Bin_N1), 256 bins total
@@ -1901,7 +1863,7 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **syntax:**
   ```mlir
-  %h = pto.vmi.vhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  %h = pto.vmi.vchist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
   ```
 - **operands:**
 
@@ -1920,7 +1882,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Attribute | Values | Default | Description |
   |---|---|---|---|
-  | `mode` | `"chist"`, `"dhist"` | `"chist"` | Histogram kind: channel histogram (half-axis `Bin_N0`/`Bin_N1`) vs distribution histogram (plain per-bin count) |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
 - **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
 - **lowering to `pto.mi`:**
@@ -1931,13 +1892,59 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **example:**
   ```mlir
-  // chist (default): channel histogram, half-axis Bin_N0/Bin_N1
-  %h = pto.vmi.vhist %bin_idx, %mask
+  // Cumulative histogram, half-axis Bin_N0/Bin_N1
+  %h = pto.vmi.vchist %bin_idx, %mask
       : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
   // → pto.as: Bin_N0 + Bin_N1 fanout → INTLV merge on vstore
+  ```
 
-  // dhist: distribution histogram, plain per-bin count
-  %d = pto.vmi.vhist %bin_idx, %mask {mode = "dhist"}
+#### `pto.vmi.vdhist`
+
+- **semantics:** **Distribution histogram** — count per bin over a
+  value/index vector, yielding a plain per-bin count vector (no `half`
+  axis).
+
+  ```c
+  // Plain per-bin distribution count
+  uint16_t bins[N] = {0};
+  for (int i = 0; i < L; i++)
+      if (mask[i])
+          bins[bin_idx[i]]++;
+  ```
+
+- **syntax:**
+  ```mlir
+  %d = pto.vmi.vdhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  ```
+- **operands:**
+
+  | Operand | Type | Description |
+  |---|---|---|
+  | `bin_idx` | `!pto.vmi.vreg<L×i8>` | Per-lane bin index (unsigned 8-bit) |
+  | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
+
+- **results:**
+
+  | Result | Type | Description |
+  |---|---|---|
+  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector |
+
+- **attributes:**
+
+  | Attribute | Values | Default | Description |
+  |---|---|---|---|
+  | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
+- **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
+- **lowering to `pto.mi`:**
+  ```
+  distribution histogram accumulate (no half-axis fanout)
+  ```
+  `#mi ≈ K`, `dep = 2`.
+
+- **example:**
+  ```mlir
+  // Distribution histogram, plain per-bin count
+  %d = pto.vmi.vdhist %bin_idx, %mask
       : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
   ```
 
@@ -2314,14 +2321,15 @@ or fusing at the `pto.mi` layer is the workaround.
 | 41 | `pto.vmi.vprelu` | 7: SFU | A | Parametric ReLU |
 | 42 | `pto.vmi.vmull` | 7: SFU | B | Widening 32×32→64 multiply |
 | 43 | `pto.vmi.vmula` | 7: SFU | A | Fused multiply-add |
-| 44 | `pto.vmi.vhist` | 7: SFU | B | Histogram bin count |
-| 45 | `pto.vmi.vgather` | 7: SFU | C | Indexed gather (B32) |
-| 46 | `pto.vmi.vgatherb` | 7: SFU | C | Byte-granularity indexed gather |
-| 47 | `pto.vmi.vscatter` | 7: SFU | C | Indexed scatter |
-| 48 | `pto.vmi.create_mask` | 8: Predicate | gen | Prefix / first-N tail mask |
-| 49 | `pto.vmi.create_group_mask` | 8: Predicate | gen | Grouped predicate mask |
-| 50 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
-| 51 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
+| 44 | `pto.vmi.vchist` | 7: SFU | B | Cumulative histogram (half-axis) |
+| 45 | `pto.vmi.vdhist` | 7: SFU | B | Distribution histogram (plain per-bin) |
+| 46 | `pto.vmi.vgather` | 7: SFU | C | Indexed gather (B32) |
+| 47 | `pto.vmi.vgatherb` | 7: SFU | C | Byte-granularity indexed gather |
+| 48 | `pto.vmi.vscatter` | 7: SFU | C | Indexed scatter |
+| 49 | `pto.vmi.create_mask` | 8: Predicate | gen | Prefix / first-N tail mask |
+| 50 | `pto.vmi.create_group_mask` | 8: Predicate | gen | Grouped predicate mask |
+| 51 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
+| 52 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
 
 ---
 
