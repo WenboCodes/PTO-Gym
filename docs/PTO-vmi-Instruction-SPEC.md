@@ -1,4 +1,4 @@
-# PTO Virtual micro Instruction (`pto.vmi`) — Unified Op Reference
+# PTO Virtual micro Instruction (`pto.vmi`)
 
 - v0.1: Doc init. Per-op reference for all 52 unified `pto.vmi` ops, with syntax,
   semantics, operand tables, lowering notes, and lit-test examples.
