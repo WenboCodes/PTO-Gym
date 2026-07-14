@@ -409,7 +409,7 @@ type's `C`).
 | 4 | **Broadcast** | `vbrc` | A (ungrouped) / B (grouped) | none |
 | 5 | **Reduce** | `vcadd`, `vcmax`, `vcmin` | B (VLane-aligned) / C (unaligned) | `Pg req` |
 | 6 | **Convert** | `vcvt`, `vinterpret_cast` | B / A | `Pg` / none |
-| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vhist) / C (gather/scatter) | `Pg` (`vhist`/SFU) / `Pg` (gather/scatter) |
+| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vchist`, `vdhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vchist, vdhist) / C (gather/scatter) | `Pg` (`vchist`/`vdhist`/SFU) / `Pg` (gather/scatter) |
 | 8 | **Predicate Ops** | `create_mask`, `create_group_mask` | gen | gen |
 | 9 | **Data Rearrange** | `vintlv`, `vdintlv` | A | `Pg` |
 
@@ -1622,12 +1622,13 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ## Group 7: SFU
 
-> **Category:** A (fused arithmetic), B (`vhist`, `vmull`), C (gather/scatter).
+> **Category:** A (fused arithmetic), B (`vchist`, `vdhist`, `vmull`), C (gather/scatter).
 > **Mask:** `Pg` on all except sort-like ops.
 >
-> Special-function / domain-accelerator ops. Mixed categories: `vhist` produces
-> a `half` axis (B); gather/scatter are Category C tile/permute ops; fused
-> activation/arithmetic ops are Category A `vreg→vreg`.
+> Special-function / domain-accelerator ops. Mixed categories: `vchist`
+> produces a `half` axis (B); `vdhist` yields a plain per-bin count (B);
+> gather/scatter are Category C tile/permute ops; fused activation/arithmetic
+> ops are Category A `vreg→vreg`.
 
 ### 7.1 Fused Arithmetic
 
@@ -1844,18 +1845,12 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ### 7.2 Histogram
 
-#### `pto.vmi.vhist`
+#### `pto.vmi.vchist`
 
-- **semantics:** Histogram bin count. The `{mode}` attribute selects the
-  histogram kind:
-  - `{mode = "chist"}` (default): **channel histogram** — the existing
-    `chistv2` semantics. Counts per-bin occurrences over a channel-index
-    vector, producing a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible
-    through the result's width axis.
-  - `{mode = "dhist"}`: **distribution histogram** — count per bin over a
-    value/index vector, yielding a plain per-bin count vector (no half axis).
-  Both modes share the same operand/result shapes; `mode` only switches the
-  binning strategy and result layout.
+- **semantics:** **Cumulative histogram** — the existing `chistv2`
+  semantics. Counts per-bin occurrences over a bin-index vector and produces
+  a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through the result's
+  width axis.
 
   ```c
   // Hardware chistv2: two halves (Bin_N0, Bin_N1), 256 bins total
@@ -1868,7 +1863,7 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **syntax:**
   ```mlir
-  %h = pto.vmi.vhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  %h = pto.vmi.vchist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
   ```
 - **operands:**
 
@@ -1887,7 +1882,6 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Attribute | Values | Default | Description |
   |---|---|---|---|
-  | `mode` | `"chist"`, `"dhist"` | `"chist"` | Histogram kind: channel histogram (half-axis `Bin_N0`/`Bin_N1`) vs distribution histogram (plain per-bin count) |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
 - **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
 - **lowering to `pto.mi`:**
@@ -1898,13 +1892,59 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **example:**
   ```mlir
-  // chist (default): channel histogram, half-axis Bin_N0/Bin_N1
-  %h = pto.vmi.vhist %bin_idx, %mask
+  // Cumulative histogram, half-axis Bin_N0/Bin_N1
+  %h = pto.vmi.vchist %bin_idx, %mask
       : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
   // → pto.as: Bin_N0 + Bin_N1 fanout → INTLV merge on vstore
+  ```
 
-  // dhist: distribution histogram, plain per-bin count
-  %d = pto.vmi.vhist %bin_idx, %mask {mode = "dhist"}
+#### `pto.vmi.vdhist`
+
+- **semantics:** **Distribution histogram** — count per bin over a
+  value/index vector, yielding a plain per-bin count vector (no `half`
+  axis).
+
+  ```c
+  // Plain per-bin distribution count
+  uint16_t bins[N] = {0};
+  for (int i = 0; i < L; i++)
+      if (mask[i])
+          bins[bin_idx[i]]++;
+  ```
+
+- **syntax:**
+  ```mlir
+  %d = pto.vmi.vdhist %bin_idx, %mask : !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i16>
+  ```
+- **operands:**
+
+  | Operand | Type | Description |
+  |---|---|---|
+  | `bin_idx` | `!pto.vmi.vreg<L×i8>` | Per-lane bin index (unsigned 8-bit) |
+  | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
+
+- **results:**
+
+  | Result | Type | Description |
+  |---|---|---|
+  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector |
+
+- **attributes:**
+
+  | Attribute | Values | Default | Description |
+  |---|---|---|---|
+  | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
+- **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
+- **lowering to `pto.mi`:**
+  ```
+  distribution histogram accumulate (no half-axis fanout)
+  ```
+  `#mi ≈ K`, `dep = 2`.
+
+- **example:**
+  ```mlir
+  // Distribution histogram, plain per-bin count
+  %d = pto.vmi.vdhist %bin_idx, %mask
       : !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256> -> !pto.vmi.vreg<256×i16>
   ```
 
@@ -2281,14 +2321,15 @@ or fusing at the `pto.mi` layer is the workaround.
 | 41 | `pto.vmi.vprelu` | 7: SFU | A | Parametric ReLU |
 | 42 | `pto.vmi.vmull` | 7: SFU | B | Widening 32×32→64 multiply |
 | 43 | `pto.vmi.vmula` | 7: SFU | A | Fused multiply-add |
-| 44 | `pto.vmi.vhist` | 7: SFU | B | Histogram bin count |
-| 45 | `pto.vmi.vgather` | 7: SFU | C | Indexed gather (B32) |
-| 46 | `pto.vmi.vgatherb` | 7: SFU | C | Byte-granularity indexed gather |
-| 47 | `pto.vmi.vscatter` | 7: SFU | C | Indexed scatter |
-| 48 | `pto.vmi.create_mask` | 8: Predicate | gen | Prefix / first-N tail mask |
-| 49 | `pto.vmi.create_group_mask` | 8: Predicate | gen | Grouped predicate mask |
-| 50 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
-| 51 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
+| 44 | `pto.vmi.vchist` | 7: SFU | B | Cumulative histogram (half-axis) |
+| 45 | `pto.vmi.vdhist` | 7: SFU | B | Distribution histogram (plain per-bin) |
+| 46 | `pto.vmi.vgather` | 7: SFU | C | Indexed gather (B32) |
+| 47 | `pto.vmi.vgatherb` | 7: SFU | C | Byte-granularity indexed gather |
+| 48 | `pto.vmi.vscatter` | 7: SFU | C | Indexed scatter |
+| 49 | `pto.vmi.create_mask` | 8: Predicate | gen | Prefix / first-N tail mask |
+| 50 | `pto.vmi.create_group_mask` | 8: Predicate | gen | Grouped predicate mask |
+| 51 | `pto.vmi.vintlv` | 9: Rearrange | A | Interleave two vectors |
+| 52 | `pto.vmi.vdintlv` | 9: Rearrange | A | Deinterleave two vectors |
 
 ---
 
