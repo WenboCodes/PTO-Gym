@@ -201,8 +201,6 @@ Logical vector register. `L` is the logical lane count; `T` is the element type.
    128 even lanes valid                     128 odd lanes valid
 ```
 
-> Restore contiguous: `INTLV_B16(P0, P1) -> [x0 x1 x2 x3 ... x255]`.
-
 #### `V<256×i8>`: 1 physical reg (K=1)
 
 **Logical view**
@@ -292,7 +290,6 @@ Logical vector register. `L` is the logical lane count; `T` is the element type.
 └────┴───┴────┴───┴─────┴─────┴───┴─────┴───┘
 ```
 
-> Contrast: fp8/i8 `sub_part(P0~P3)` is a byte slot within a 4B group (`[P0 P1 P2 P3] [P0 P1 P2 P3] ...`), a different axis from fp16's part EVEN/ODD; see `V<64×fp8>`.
 
 #### `V<64×fp8>`: 1 partial physical reg (K=1, low 64 lanes valid)
 
@@ -326,8 +323,6 @@ P0: 256B fp8 carrier, viewed as 64 groups × 4B, only the P0 slot is valid per g
 └────────────┴────────────┴─────┴─────────────┘
    grp0          grp1              grp63
 ```
-
-> This sparse view is a lowering layout that does not change the logical view of `V<64×fp8>`; when `vstore` lowers to `PK4_B32` it extracts accordingly and writes out contiguous 64B fp8.
 
 #### `!pto.vmi.mask<L>`
 
@@ -484,6 +479,7 @@ type's `C`).
 - **lowering to `pto.mi`:**
   - **dist-mode** `vload` and `vstore` accept an optional `{dist_mode = "..."}` attribute
 declaring the memory access pattern. Default is `"continuous"`.
+
   | `dist_mode` | Physical lowering |
   |---|---|
   | `"continuous"` | `K × pto.vlds {dist="NORM"}` (element-width-independent `NORM` load) |
@@ -616,6 +612,7 @@ declaring the memory access pattern. Default is `"continuous"`.
 - **lowering to `pto.mi`:**
   - **dist-mode** `vload` and `vstore` accept an optional `{dist_mode = "..."}` attribute
 declaring the memory access pattern. Default is `"continuous"`.
+
   | `dist_mode` | Physical lowering |
   |---|---|
   | `"continuous"` | `K × pto.vsts {dist="NORM_B*"}` |
@@ -769,9 +766,9 @@ declaring the memory access pattern. Default is `"continuous"`.
   ```mlir
   // fp32 add with deinterleaved layout
   %sum = pto.vmi.vadd %a, %b
-      : !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>,
-        !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>
-      -> !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>
+      : !pto.vmi.vreg<128×f32>,
+        !pto.vmi.vreg<128×f32>
+      -> !pto.vmi.vreg<128×f32>
   // → pto.as: 2 × pto.vadd (EVEN/ODD), each with create_mask all-active mask
 
   // Masked add with merge mode
@@ -906,15 +903,6 @@ declaring the memory access pattern. Default is `"continuous"`.
   `#mi = K`, `dep = 1`.
 
 ### 3.3 Bitwise Ops
-
-> **Mask-operand support (planned):** `vand` / `vor` / `vxor` / `vnot` will be
-> extended to accept **mask** operands in addition to vector registers. When
-> the operands are masks, the op performs a per-lane **predicate boolean**
-> operation (AND / OR / XOR / NOT) on the mask lanes and produces a mask
-> result, rather than an elementwise data bitwise op on a vreg. This reuses the
-> same op names for both vreg-bitwise and mask-boolean forms; the operand type
-> selects the mode. There is no separate predicate-logic op (e.g. `pand`/
-> `por`/`pnot`); mask boolean logic is expressed through these ops.
 
 #### `pto.vmi.vand` / `pto.vmi.vor` / `pto.vmi.vxor`
 
@@ -1104,10 +1092,10 @@ scalar type must match the vector element type.
   ```mlir
   // f32 less-than compare over deinterleaved layout
   %lt = pto.vmi.vcmp %a, %b, %seed {cmp = "lt"}
-      : !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>,
-        !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>,
-        !pto.vmi.mask<128×b32, #pto.vmi.layout<deinterleaved = 2>>
-      -> !pto.vmi.mask<128×b32, #pto.vmi.layout<deinterleaved = 2>>
+      : !pto.vmi.vreg<128×f32>,
+        !pto.vmi.vreg<128×f32>,
+        !pto.vmi.mask<128×b32>
+      -> !pto.vmi.mask<128×b32>
   // → pto.as: 2 × pto.vcmp "lt" (EVEN/ODD), each with per-reg seed mask
 
   // i32 signed greater-than-or-equal over deinterleaved layout
@@ -1545,8 +1533,8 @@ or fusing at the `pto.mi` layer is the workaround.
   ```mlir
   // fp16 → fp32 widen (radix-2, produces parity EVEN/ODD)
   %w = pto.vmi.vcvt %a
-      : !pto.vmi.vreg<128×f16, #pto.vmi.layout<contiguous>>
-      -> !pto.vmi.vreg<128×f32, #pto.vmi.layout<deinterleaved = 2>>
+      : !pto.vmi.vreg<128×f16>
+      -> !pto.vmi.vreg<128×f32>
   // → pto.as: 2 × pto.vcvt EVEN/ODD + ppack (parity companion)
 
   // fp32 → fp16 narrow with half-up rounding
@@ -2046,7 +2034,7 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ---
 
-## Group 8: Predicate Ops
+## Group 8: Predicate Generation Ops
 
 > **Category:** gen (mask producers — take no input mask).
 > **Mask in:** none (they generate masks).
