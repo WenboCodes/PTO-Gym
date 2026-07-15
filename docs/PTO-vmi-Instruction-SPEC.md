@@ -53,6 +53,51 @@ pto.mi    vcvt EVEN/ODD + two-way vadd + vstsx2 INTLV_B32
   (including `part/pack/interleave/dist`). At `K=1` this degenerates to
   zero-overhead pass-through.
 
+**Relationship to the `pto.mi` architecture — inherited, not redefined.**
+`pto.vmi` is strictly a **micro-instruction-level** abstraction; it does **not**
+redefine the architecture. Every architectural definition of the underlying
+`pto.mi` target is inherited verbatim from the
+[PTO micro Instruction SPEC](./PTO-micro-Instruction-SPEC.md): the hardware
+pipeline model (MTE2 / Vector / MTE3 under the Decoupled Access-Execute scheme),
+the Vector Lane (VLane) organization and the `!pto.vreg` / `!pto.mask` physical
+constants, the memory hierarchy and address spaces (`!pto.ptr<T, gm/ub>`, 256 KB
+UB), and the synchronization model. In particular, the **Vector Function (VF)**
+definition is taken unchanged: the `__VEC_SCOPE__` execution-scope contract —
+scalar–vector fork-launch semantics, the `pto.vecscope` /
+`pto.strict_vecscope` region ops, the strict-vs-default region-argument
+distinction, the single-vector-interval legality rule, and the prohibition on
+nested vector intervals — is exactly as the micro-SPEC's *Execution Scopes
+(`__VEC_SCOPE__`)* section defines it. `pto.vmi` introduces **no new scope op**
+and changes **no scope semantics**: a `pto.vmi` program is still enclosed by
+exactly one `pto.vecscope` / `pto.strict_vecscope` region.
+
+**Scope of replacement — micro-instruction groups §3–§13 only.** `pto.vmi`
+performs abstraction and replacement **only at the micro-instruction level**, and
+only over the vector compute / UB↔vreg data-movement surface of `pto.mi`. It
+unifies and replaces micro-instruction groups **§3 (Vector Load/Store)** through
+**§13 (DSA/SFU Ops)** — that is, §3 Vector Load/Store, §4 Predicate Load/Store,
+§5 Materialization & Predicate Ops, §6 Unary Vector Ops, §7 Binary Vector Ops,
+§8 Vec-Scalar Ops, §9 Conversion Ops, §10 Reduction Ops, §11 Compare & Select,
+§12 Data Rearrangement, and §13 DSA/SFU Ops — folding their per-op physical-layout
+variants (interleave / parity / part / pack / dist tokens) into a single logical
+surface that `pto.as` lowers back to concrete `pto.mi`.
+
+Everything outside that range remains **untouched `pto.mi`**, exactly as the
+micro-SPEC defines it, and is outside `pto.vmi`'s replacement scope:
+
+- §1 Pipeline Synchronization (`pto.set_flag` / `pto.wait_flag` /
+  `pto.pipe_barrier` / `pto.get_buf` / `pto.rls_buf`)
+- §2 DMA Copy Programming (`pto.mte_gm_ub` / `pto.mte_ub_gm` /
+  `pto.mte_ub_ub` / `pto.mte_ub_l1`)
+- §14 shared `arith` and §15 shared `scf` — the scalar / control-flow glue
+  surrounding the VF
+- §16 Cube Matrix Multiply — the cube pipe, orthogonal to the vector pipe
+
+The partition is therefore clean: `pto.vmi` replaces the **vector-pipe compute
+and UB↔vreg data-movement** instructions (§3–§13) at the micro-instruction level,
+while the surrounding synchronization, DMA, scalar-control, and cube layers stay
+as authored `pto.mi`.
+
 ### 1.2 Logical vs Physical
 
 A `pto.vmi` value is **logical** — a flat sequence of `L` lanes of type `T`.
