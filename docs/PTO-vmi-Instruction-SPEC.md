@@ -1088,12 +1088,13 @@ scalar type must match the vector element type.
 
   | Attribute | Values | Default | Description |
   |---|---|---|---|
-  | `cmp` | `eq`, `ne`, `lt`, `le`, `gt`, `ge` (unordered fp+int) | *(required)* | Comparison mode |
-  | | `oeq`, `one`, `olt`, `ole`, `ogt`, `oge` (ordered fp) | | FP ordered forms |
-  | | `slt`, `sle`, `sgt`, `sge` (signed int) | | Signed integer forms |
+  | `cmp` | `eq`, `ne`, `lt`, `le`, `gt`, `ge` | *(required)* | Comparison mode (fp unordered / integer; integer signedness comes from the element type: `iN` vs `uiN`) |
+  | | `oeq`, `one`, `olt`, `ole`, `ogt`, `oge` | | FP ordered forms |
   | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
 
-- **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
+- **datatypes:** `i8`/`si8`/`ui8` – `i32`/`si32`/`ui32`, `f16`, `bf16`, `f32`.
+  Integer signedness is taken from the element type; signless `iN` is treated
+  as signed (equivalent to `siN`).
 - **lowering to `pto.mi`:**
   ```
   K × pto.vcmp {cmp_mode}
@@ -1110,9 +1111,17 @@ scalar type must match the vector element type.
       -> !pto.vmi.mask<128×b32, #pto.vmi.layout<deinterleaved = 2>>
   // → pto.as: 2 × pto.vcmp "lt" (EVEN/ODD), each with per-reg seed mask
 
-  // i32 signed greater-than-or-equal over deinterleaved layout
-  %ge = pto.vmi.vcmp %a, %b, %seed {cmp = "sge"}
+  // i32 signed greater-than-or-equal (signedness carried by the `i32` element type)
+  %ge = pto.vmi.vcmp %a, %b, %seed {cmp = "ge"}
       : !pto.vmi.vreg<128×i32>, !pto.vmi.vreg<128×i32>, !pto.vmi.mask<128×b32>
+      -> !pto.vmi.mask<128×b32>
+  // si32 signed greater-than-or-equal (signedness carried by the `si32` element type)
+  %ge = pto.vmi.vcmp %a, %b, %seed {cmp = "ge"}
+      : !pto.vmi.vreg<128×si32>, !pto.vmi.vreg<128×si32>, !pto.vmi.mask<128×b32>
+      -> !pto.vmi.mask<128×b32>
+  // ui32 unsigned greater-than-or-equal (same `cmp = "ge"`; signedness from `ui32`)
+  %uge = pto.vmi.vcmp %ua, %ub, %seed {cmp = "ge"}
+      : !pto.vmi.vreg<128×ui32>, !pto.vmi.vreg<128×ui32>, !pto.vmi.mask<128×b32>
       -> !pto.vmi.mask<128×b32>
   // bf16 contiguous equality compare (K=1)
   %eq = pto.vmi.vcmp %a, %b, %seed {cmp = "eq"}
@@ -1148,7 +1157,10 @@ scalar type must match the vector element type.
   | `result` | `!pto.vmi.mask<L>` | Predicate mask |
 
 - **attributes:** Same `cmp` / `pmode` as `vcmp`.
-- **datatypes:** `i8`–`i32`, `f16`, `bf16`, `f32`
+- **datatypes:** `i8`/`si8`/`ui8` – `i32`/`si32`/`ui32`, `f16`, `bf16`, `f32`.
+  Integer signedness is taken from the element type; signless `iN` is treated
+  as signed (equivalent to `siN`). The scalar operand's element type must
+  match the vector's, so signedness is consistent on both operands.
 - **lowering to `pto.mi`:**
   ```
   K × pto.vcmps {cmp_mode}
@@ -1856,11 +1868,16 @@ or fusing at the `pto.mi` layer is the workaround.
 
   ```c
   // Hardware chistv2: two halves (Bin_N0, Bin_N1), 256 bins total
-  uint16_t bins[256];
-  for (int b = 0; b < 256; b++) bins[b] = acc[b];   // carry-in
+  uint16_t dhist[256];
   for (int i = 0; i < L; i++)
       if (mask[i])
-          bins[src[i]]++;
+          dhist[src[i]]++;
+  uint16_t chist[256];
+  uint16_t cumulative = 0;
+  for (int b = 0; b < 256; b++) {
+      cumulative += dhist[b];
+      chist[b] = acc[b] + cumulative;
+  }
   // dst carries Bin_N0 (bins 0–127) and Bin_N1 (bins 128–255) on a half axis
   ```
 
@@ -1868,21 +1885,21 @@ or fusing at the `pto.mi` layer is the workaround.
   ```mlir
   // output is Bin_N0 + Bin_N1
   %h = pto.vmi.vchist %acc, %src, %mask
-      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
-     -> !pto.vmi.vreg<256×i16>
+      : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×ui16>
 
   // output is Bin_N0 when the source lanes are known to be < 128
   %h = pto.vmi.vchist %acc, %src, %mask
-      : !pto.vmi.vreg<128×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
-     -> !pto.vmi.vreg<128×i16>
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×T_count>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only) |
-  | `src`  | `!pto.vmi.vreg<L×i8>` | Source lanes to be binned (unsigned 8-bit) |
-  | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
+  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only). Element type must be `ui16`. |
+  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
@@ -1890,12 +1907,8 @@ or fusing at the `pto.mi` layer is the workaround.
   |---|---|---|
   | `result` | `!pto.vmi.vreg<L×T_count>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only) |
 
-- **attributes:**
-
-  | Attribute | Values | Default | Description |
-  |---|---|---|---|
-  | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
-- **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
+- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
+  verifier rejects any other element type.
 - **lowering to `pto.mi`:**
   ```
   chistv2 Bin_N0 + Bin_N1 (two-half fanout) + widen/accumulate
@@ -1906,14 +1919,14 @@ or fusing at the `pto.mi` layer is the workaround.
   ```mlir
   // Cumulative histogram, full 256-bin (Bin_N0 + Bin_N1) output
   %h = pto.vmi.vchist %acc, %src, %mask
-      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
-     -> !pto.vmi.vreg<256×i16>
+      : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×ui16>
   // → pto.as: Bin_N0 + Bin_N1 fanout → INTLV merge on vstore
 
   // Bin_N0-only 128-bin output (source lanes known to be < 128)
   %h0 = pto.vmi.vchist %acc0, %src, %mask
-      : !pto.vmi.vreg<128×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
-     -> !pto.vmi.vreg<128×i16>
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
   ```
 
 #### `pto.vmi.vdhist`
@@ -1925,26 +1938,26 @@ or fusing at the `pto.mi` layer is the workaround.
 
   ```c
   // Plain per-bin distribution count
-  uint16_t bins[N];
-  for (int b = 0; b < N; b++) bins[b] = acc[b];     // carry-in
+  uint16_t dhist[N];
+  for (int b = 0; b < N; b++) dhist[b] = acc[b];     // carry-in
   for (int i = 0; i < L; i++)
       if (mask[i])
-          bins[src[i]]++;
+          dhist[src[i]]++;
   ```
 
 - **syntax:**
   ```mlir
   %d = pto.vmi.vdhist %acc, %src, %mask
-      : !pto.vmi.vreg<L×i16>, !pto.vmi.vreg<L×i8>, !pto.vmi.mask<L>
-     -> !pto.vmi.vreg<L×i16>
+      : !pto.vmi.vreg<L×ui16>, !pto.vmi.vreg<L×ui8>, !pto.vmi.mask<L>
+     -> !pto.vmi.vreg<L×ui16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×T_count>` | Carry-in accumulator; same shape as `result` |
-  | `src`  | `!pto.vmi.vreg<L×i8>` | Source lanes to be binned (unsigned 8-bit) |
-  | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
+  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result`. Element type must be `ui16`. |
+  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
@@ -1952,12 +1965,8 @@ or fusing at the `pto.mi` layer is the workaround.
   |---|---|---|
   | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector on top of `acc` |
 
-- **attributes:**
-
-  | Attribute | Values | Default | Description |
-  |---|---|---|---|
-  | `pmode` | `"zero"`, `"merge"` | `"zero"` | Inactive-lane behavior |
-- **datatypes:** Bin index: `i8`/`ui8`; result count type: typically `i16`/`i32`
+- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
+  verifier rejects any other element type.
 - **lowering to `pto.mi`:**
   ```
   distribution histogram accumulate (no half-axis fanout)
@@ -1968,8 +1977,8 @@ or fusing at the `pto.mi` layer is the workaround.
   ```mlir
   // Distribution histogram, plain per-bin count
   %d = pto.vmi.vdhist %acc, %src, %mask
-      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
-     -> !pto.vmi.vreg<256×i16>
+      : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×ui16>
   ```
 
 ### 7.3 Gather / Scatter
