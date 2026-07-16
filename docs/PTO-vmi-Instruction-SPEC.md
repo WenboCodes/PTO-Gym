@@ -5,17 +5,7 @@
 
 **Status:** draft. This document is the **instruction reference** for the unified
 `pto.vmi` surface. It documents every user-facing op with concrete MLIR syntax,
-per-operand tables, C-style semantics, and lowering-to-`pto.mi` guidance. It
-deliberately does **not** re-derive design rationale, cost models, or lowering
-rules — those live in:
-
-- [PTO-vmi-design.md](../中文版/PTO-vmi-design.md) — design rationale, type
-  system formalization, group semantics, and the `pto.as` lowering contract.
-- [PTO-vmi-Instruction-SPEC.md](./PTO-vmi-Instruction-SPEC.md) — the earlier
-  design-level op surface, cost model, and `pto.vmi → pto.mi` coverage analysis.
-- [PTO-micro-Instruction-SPEC.md](./PTO-micro-Instruction-SPEC.md) — the
-  `pto.mi` target ISA this surface lowers to (per-op semantics, pseudocode, A5
-  simulator latency tables).
+per-operand tables, C-style semantics, and lowering-to-`pto.mi` guidance. 
 
 Category A/B/C is defined inline in §1.4 below (self-contained in this doc).
 Whenever this doc references a physical `pto.mi` op, it means the micro-SPEC.
