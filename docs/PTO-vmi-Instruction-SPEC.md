@@ -1571,8 +1571,8 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Attribute | Values | Valid for | Description |
   |---|---|---|---|
-  | `rounding` | `"A"` (away-from-zero), `"H"` (half-up) | fp narrowing | Rounding mode |
-  | `saturate` | `"SAT"` | any narrowing | Saturating on overflow |
+  | `rounding` | `"A"` (away-from-zero), `"H"` (half-up) | fp narrowing | Rounding mode (TODO: more rounding modes will be added) |
+  | `saturate` | `"SAT"` | any narrowing | Saturating on overflow (TODO: NOSAT mode will be added)|
   | `pmode` | `"zero"`, `"merge"` | all | Inactive-lane behavior |
 
 - **datatypes:** Source and destination from `{f32, f16, bf16, fp8_e4m3, fp8_e5m2, i32, i16, i8, ui32, ui16, ui8}`
