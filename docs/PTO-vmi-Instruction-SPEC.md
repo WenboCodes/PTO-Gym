@@ -449,7 +449,7 @@ type's `C`).
 | 4 | **Broadcast** | `vbrc` | A (ungrouped) / B (grouped) | none |
 | 5 | **Reduce** | `vcadd`, `vcmax`, `vcmin` | B (VLane-aligned) / C (unaligned) | `Pg req` |
 | 6 | **Convert** | `vcvt`, `vinterpret_cast` | B / A | `Pg` / none |
-| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vchist`, `vdhist`, `vgather`, `vgatherb`, `vscatter` | A (fused) / B (vmull, vchist, vdhist) / C (gather/scatter) | `Pg` (`vchist`/`vdhist`/SFU) / `Pg` (gather/scatter) |
+| 7 | **SFU** | `vexpdif`, `vaxpy`, `vlrelu`, `vprelu`, `vmull`, `vmula`, `vchist`, `vdhist`, `vgather`, `vgatherb`, `vscatter` | A (fused, `vmull`) / B (`vchist`, `vdhist`) / C (gather/scatter) | `Pg` (`vchist`/`vdhist`/SFU) / `Pg` (gather/scatter) |
 | 8 | **Predicate Ops** | `create_mask`, `create_group_mask` | gen | gen |
 | 9 | **Data Rearrange** | `vintlv`, `vdintlv` | A | `Pg` |
 
@@ -1667,13 +1667,14 @@ or fusing at the `pto.mi` layer is the workaround.
 
 ## Group 7: SFU
 
-> **Category:** A (fused arithmetic), B (`vchist`, `vdhist`, `vmull`), C (gather/scatter).
+> **Category:** A (fused arithmetic, `vmull`), B (`vchist`, `vdhist`), C (gather/scatter).
 > **Mask:** `Pg` on all except sort-like ops.
 >
 > Special-function / domain-accelerator ops. Mixed categories: `vchist`
 > produces a `half` axis (B); `vdhist` yields a plain per-bin count (B);
 > gather/scatter are Category C tile/permute ops; fused activation/arithmetic
-> ops are Category A `vreg→vreg`.
+> ops (including `vmull`, whose 64-bit product is split into a pair of `i32`
+> results at the VMI surface) are Category A `vreg→vreg`.
 
 ### 7.1 Fused Arithmetic
 
@@ -1815,18 +1816,30 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vmull`
 
-- **semantics:** Widening 32-bit × 32-bit → 64-bit multiply. The result
-  occupies two physical registers (hi + lo) accessed through a virtual `width`
-  axis.
+- **semantics:** Widening 32-bit × 32-bit → 64-bit integer multiply. At the
+  VMI surface the 64-bit product is **split into a pair of `i32` results**:
+  `%low` carries the lower 32 bits and `%high` carries the upper 32 bits.
+  This matches the shape of `pto.mi.vmull` one-to-one, so no `width` axis is
+  introduced at the VMI layer. Signedness is inherited from the inputs
+  (`i32 → (i32, i32)` uses arithmetic shift for the high half;
+  `ui32 → (ui32, ui32)` uses logical shift).
 
   ```c
-  for (int i = 0; i < L; i++)
-      dst[i] = mask[i] ? (int64_t)a[i] * (int64_t)b[i] : (pmode_merge ? dst_old[i] : 0);
+  for (int i = 0; i < L; i++) {
+      // signed variant; use uint64_t for the ui32 form
+      int64_t r = (int64_t)lhs[i] * (int64_t)rhs[i];
+      low [i] = mask[i] ? (int32_t)(r & 0xFFFFFFFF)
+                        : (pmode_merge ? low_old [i] : 0);
+      high[i] = mask[i] ? (int32_t)(r >> 32)
+                        : (pmode_merge ? high_old[i] : 0);
+  }
   ```
 
 - **syntax:**
   ```mlir
-  %res = pto.vmi.vmull %a, %b, %mask : !pto.vmi.vreg<L×i32>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L> -> !pto.vmi.vreg<L×i64>
+  %low, %high = pto.vmi.vmull %lhs, %rhs, %mask
+      : !pto.vmi.vreg<L×i32>, !pto.vmi.vreg<L×i32>, !pto.vmi.mask<L>
+        -> !pto.vmi.vreg<L×i32>, !pto.vmi.vreg<L×i32>
   ```
 - **operands:**
 
@@ -1836,19 +1849,32 @@ or fusing at the `pto.mi` layer is the workaround.
   | `b` | `!pto.vmi.vreg<L×i32>` | Second operand |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate |
 
-- **results:** `!pto.vmi.vreg<L×i64>` (2 physical regs per logical value)
-- **datatypes:** `i32` → `i64` (also `ui32` → `ui64`)
+- **results:**
+
+  | Result | Type | Description |
+  |---|---|---|
+  | `low`  | `!pto.vmi.vreg<L×i32>` | Lower 32 bits of the per-lane 64-bit product |
+  | `high` | `!pto.vmi.vreg<L×i32>` | Upper 32 bits of the per-lane 64-bit product (arithmetic shift for `i32`; logical shift for `ui32`) |
+
+- **attributes:**
+
+  | Attribute | Type | Default | Description |
+  |---|---|---|---|
+  | `pmode` | `StrAttr` (`"zero"` \| `"merge"`) | `"zero"` | Predication mode. `"merge"` preserves the previous `low`/`high` lane values on inactive lanes; on A5 this is emulated (see Appendix C). |
+
+- **datatypes:** `i32 → (i32, i32)`, `ui32 → (ui32, ui32)` (both result vregs share the input signedness).
 - **lowering to `pto.mi`:**
   ```
-  K × pto.vmull (produces hi+lo pair per reg)
+  for k in [0, K):
+      (low_k, high_k) = pto.mi.vmull(lhs_k, rhs_k, mask_k)
   ```
-  `#mi = K`, `dep = 1`. Two result regs per input reg → Category B (`width` axis).
+  `#mi = K`, `dep = 1`. Structurally 1:1 with `pto.mi.vmull`
 
 - **example:**
   ```mlir
-  %res = pto.vmi.vmull %a, %b, %mask
+  %lo, %hi = pto.vmi.vmull %lhs, %rhs, %mask
       : !pto.vmi.vreg<64×i32>, !pto.vmi.vreg<64×i32>, !pto.vmi.mask<64>
-      -> !pto.vmi.vreg<64×i64>
+        -> !pto.vmi.vreg<64×i32>, !pto.vmi.vreg<64×i32>
   ```
 
 #### `pto.vmi.vmula`
@@ -2385,7 +2411,7 @@ or fusing at the `pto.mi` layer is the workaround.
 | 39 | `pto.vmi.vaxpy` | 7: SFU | A | Fused α·x+y |
 | 40 | `pto.vmi.vlrelu` | 7: SFU | A | Leaky ReLU |
 | 41 | `pto.vmi.vprelu` | 7: SFU | A | Parametric ReLU |
-| 42 | `pto.vmi.vmull` | 7: SFU | B | Widening 32×32→64 multiply |
+| 42 | `pto.vmi.vmull` | 7: SFU | A | Widening 32×32 multiply, split into (`low`, `high`) `i32` pair |
 | 43 | `pto.vmi.vmula` | 7: SFU | A | Fused multiply-add |
 | 44 | `pto.vmi.vchist` | 7: SFU | B | Cumulative histogram (half-axis) |
 | 45 | `pto.vmi.vdhist` | 7: SFU | B | Distribution histogram (plain per-bin) |
