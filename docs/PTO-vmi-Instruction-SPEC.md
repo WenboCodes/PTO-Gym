@@ -1921,9 +1921,10 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vchist`
 
-- **semantics:** **Cumulative histogram** over unsigned 8-bit source lanes.
-  Counts per-bin occurrences over `%src` on top of a carry-in accumulator
-  `%acc`, producing a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through
+- **semantics:** **Cumulative histogram** over 8-bit source lanes
+  (interpreted as unsigned). Counts per-bin occurrences over `%src` on top
+  of a carry-in accumulator `%acc`, producing a `half`-axis
+  (`Bin_N0`/`Bin_N1`) pair accessible through
   the result's width axis. Full-form output is 256-bin (Bin_N0 + Bin_N1); if
   the source range is known to be `< 128`, the result may be a 128-bin
   Bin_N0-only vector.
@@ -1959,18 +1960,20 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only). Element type must be `ui16`. |
-  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only). Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
+  | `src`  | `!pto.vmi.vreg<L×{ui8|i8}>` | Source lanes to be binned; 8-bit element type is `ui8` or signless `i8` (interpreted as unsigned). |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only) |
+  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only). Element type must equal `acc`'s. |
 
-- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
-  verifier rejects any other element type.
+- **datatypes:** Source bin index: `ui8` or signless `i8`. Accumulator / result:
+  `ui16` or signless `i16`. All are interpreted as unsigned; signed types
+  (`si8` / `si16`) are rejected by the verifier. `acc` and `result` must have
+  identical element type — mixing `ui16` and `i16` is rejected.
 - **lowering to `pto.mi`:**
   ```
   chistv2 Bin_N0 + Bin_N1 (two-half fanout) + widen/accumulate
@@ -1989,14 +1992,19 @@ or fusing at the `pto.mi` layer is the workaround.
   %h0 = pto.vmi.vchist %acc0, %src, %mask
       : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
      -> !pto.vmi.vreg<128×ui16>
+
+  // signless i16/i8 also accepted (interpreted as unsigned; acc and result must match)
+  %hs = pto.vmi.vchist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   ```
 
 #### `pto.vmi.vdhist`
 
-- **semantics:** **Distribution histogram** over unsigned 8-bit source
-  lanes. Counts per-bin occurrences over `%src` on top of a carry-in
-  accumulator `%acc`, yielding a plain per-bin count vector (no `half`
-  axis).
+- **semantics:** **Distribution histogram** over 8-bit source lanes
+  (interpreted as unsigned). Counts per-bin occurrences over `%src` on top
+  of a carry-in accumulator `%acc`, yielding a plain per-bin count vector
+  (no `half` axis).
 
   ```c
   // Plain per-bin distribution count
@@ -2017,18 +2025,20 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result`. Element type must be `ui16`. |
-  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result`. Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
+  | `src`  | `!pto.vmi.vreg<L×{ui8|i8}>` | Source lanes to be binned; 8-bit element type is `ui8` or signless `i8` (interpreted as unsigned). |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector on top of `acc` |
+  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Plain per-bin count vector on top of `acc`. Element type must equal `acc`'s. |
 
-- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
-  verifier rejects any other element type.
+- **datatypes:** Source bin index: `ui8` or signless `i8`. Accumulator / result:
+  `ui16` or signless `i16`. All are interpreted as unsigned; signed types
+  (`si8` / `si16`) are rejected by the verifier. `acc` and `result` must have
+  identical element type — mixing `ui16` and `i16` is rejected.
 - **lowering to `pto.mi`:**
   ```
   distribution histogram accumulate (no half-axis fanout)
@@ -2041,6 +2051,11 @@ or fusing at the `pto.mi` layer is the workaround.
   %d = pto.vmi.vdhist %acc, %src, %mask
       : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
      -> !pto.vmi.vreg<256×ui16>
+
+  // signless i16/i8 also accepted (interpreted as unsigned; acc and result must match)
+  %ds = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   ```
 
 ### 7.3 Gather / Scatter
