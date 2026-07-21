@@ -2017,15 +2017,21 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **syntax:**
   ```mlir
+  // 256-bin full output
   %d = pto.vmi.vdhist %acc, %src, %mask
-      : !pto.vmi.vreg<L×ui16>, !pto.vmi.vreg<L×ui8>, !pto.vmi.mask<L>
-     -> !pto.vmi.vreg<L×ui16>
+      : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×ui16>
+
+  // 128-bin output when the source lanes are known to be < 128
+  %d = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result`. Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
+  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result` (256-bin full, or 128-bin when the source range is known to be < 128). Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
   | `src`  | `!pto.vmi.vreg<L×{ui8|i8}>` | Source lanes to be binned; 8-bit element type is `ui8` or signless `i8` (interpreted as unsigned). |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
@@ -2033,7 +2039,7 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Plain per-bin count vector on top of `acc`. Element type must equal `acc`'s. |
+  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Plain per-bin count vector on top of `acc` (256-bin full, or 128-bin when the source range is known to be < 128). Element type must equal `acc`'s. |
 
 - **datatypes:** Source bin index: `ui8` or signless `i8`. Accumulator / result:
   `ui16` or signless `i16`. All are interpreted as unsigned; signed types
@@ -2047,10 +2053,15 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **example:**
   ```mlir
-  // Distribution histogram, plain per-bin count
+  // Distribution histogram, plain per-bin count (256-bin full)
   %d = pto.vmi.vdhist %acc, %src, %mask
       : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
      -> !pto.vmi.vreg<256×ui16>
+
+  // 128-bin output (source lanes known to be < 128)
+  %d0 = pto.vmi.vdhist %acc0, %src, %mask
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
 
   // signless i16/i8 also accepted (interpreted as unsigned; acc and result must match)
   %ds = pto.vmi.vdhist %acc, %src, %mask
