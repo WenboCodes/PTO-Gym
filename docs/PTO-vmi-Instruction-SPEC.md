@@ -1610,20 +1610,26 @@ or fusing at the `pto.mi` layer is the workaround.
 ### `pto.vmi.vcvt`
 
 - **semantics:** Unified elementwise type conversion. The conversion direction
-  is derived from source and destination element types:
+  is derived from the source and destination element types; the verifier
+  dispatches to one of six kinds:
 
-  | Direction | Condition | Replaces |
-  |---|---|---|
-  | fp → fp, `\|dst\| > \|src\|` | Floating-point widening | `extf` |
-  | fp → fp, `\|dst\| < \|src\|` | Floating-point narrowing | `truncf` |
-  | fp → int | Float to signed integer | `fptosi` |
-  | int → fp | Signed integer to float | `sitofp` |
-  | int -> int, `\|dst\| > \|src\|` | Integer extension (sign from source element type) | `extsi` / `extui` |
-  | int → int, `\|dst\| < \|src\|` | Saturating integer truncation | `trunci` |
+  1. **FpWiden** — `fp → fp`, `|dst| > |src|` (e.g. `f16 → f32`,
+     `bf16 → f32`, `fp8_e4m3 → f16`).
+
+  2. **FpNarrow** — `fp → fp`, `|dst| < |src|` (e.g. `f32 → f16`,
+     `f32 → bf16`, `f32 → fp8_e4m3`).
+
+  3. **FpToSi** — `fp → int` (e.g. `f32 → i32`, `f16 → i8`).
+
+  4. **SiToFp** — `int → fp` (e.g. `i32 → f32`, `i8 → f16`).
+
+  5. **IntWiden** — `int → int`, `|dst| > |src|`.
+
+  6. **IntNarrow** — `int → int`, `|dst| < |src|`.
 
 - **syntax:**
   ```mlir
-  %r = pto.vmi.vcvt %src {rounding = "H"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
+  %r = pto.vmi.vcvt %src {rounding = "H", saturate = "SAT"} : !pto.vmi.vreg<L×T_src> -> !pto.vmi.vreg<L×T_dst>
   ```
 - **operands:**
 
@@ -1641,9 +1647,8 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Attribute | Values | Valid for | Description |
   |---|---|---|---|
-  | `rounding` | `"A"` (away-from-zero), `"H"` (half-up) | fp narrowing | Rounding mode (TODO: more rounding modes will be added) |
-  | `saturate` | `"SAT"` | any narrowing | Saturating on overflow (TODO: NOSAT mode will be added)|
-  | `pmode` | `"zero"`, `"merge"` | all | Inactive-lane behavior |
+  | `rounding` | `"R"` (nearest-even), `"A"` (away-from-zero), `"H"` (half-up), `"Z"` (toward-zero) | fp narrowing | Rounding mode |
+  | `saturate` | `"SAT"`, `"NOSAT"` | **required** for fp-narrow / int-narrow / fp→si | `SAT` clamps to ±max of the destination type; `NOSAT` performs a direct bit truncation of the result representation. |
 
 - **datatypes:** Source and destination from `{f32, f16, bf16, fp8_e4m3, fp8_e5m2, i32, i16, i8, ui32, ui16, ui8}`
 - **lowering to `pto.mi`:**
@@ -1665,16 +1670,24 @@ or fusing at the `pto.mi` layer is the workaround.
   // → pto.as: 2 × pto.vcvt EVEN/ODD + ppack (parity companion)
 
   // fp32 → fp16 narrow with half-up rounding
-  %n = pto.vmi.vcvt %y {rounding = "H"}
+  %n = pto.vmi.vcvt %y {rounding = "H", saturate = "SAT"}
       : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×f16>
 
   // ui8 -> i16 unsigned extension
   %z = pto.vmi.vcvt %a
       : !pto.vmi.vreg<256×ui8> -> !pto.vmi.vreg<256×i16>
 
-  // f32 → fp8 quantized narrow
-  %q = pto.vmi.vcvt %s
+  // f32 → fp8 quantized narrow (saturate required)
+  %q = pto.vmi.vcvt %s {saturate = "SAT"}
       : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×fp8_e4m3>
+
+  // i32 → i8 int-narrow without saturation (wrap on overflow)
+  %t = pto.vmi.vcvt %v {saturate = "NOSAT"}
+      : !pto.vmi.vreg<64×i32> -> !pto.vmi.vreg<64×i8>
+
+  // f32 → i32 fp-to-si (saturate required)
+  %r = pto.vmi.vcvt %x {saturate = "SAT"}
+      : !pto.vmi.vreg<64×f32> -> !pto.vmi.vreg<64×i32>
   ```
 
 - **notes:**
@@ -1988,9 +2001,10 @@ or fusing at the `pto.mi` layer is the workaround.
 
 #### `pto.vmi.vchist`
 
-- **semantics:** **Cumulative histogram** over unsigned 8-bit source lanes.
-  Counts per-bin occurrences over `%src` on top of a carry-in accumulator
-  `%acc`, producing a `half`-axis (`Bin_N0`/`Bin_N1`) pair accessible through
+- **semantics:** **Cumulative histogram** over 8-bit source lanes
+  (interpreted as unsigned). Counts per-bin occurrences over `%src` on top
+  of a carry-in accumulator `%acc`, producing a `half`-axis
+  (`Bin_N0`/`Bin_N1`) pair accessible through
   the result's width axis. Full-form output is 256-bin (Bin_N0 + Bin_N1); if
   the source range is known to be `< 128`, the result may be a 128-bin
   Bin_N0-only vector.
@@ -2026,18 +2040,20 @@ or fusing at the `pto.mi` layer is the workaround.
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only). Element type must be `ui16`. |
-  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result` (256-bin Bin_N0+Bin_N1, or 128-bin Bin_N0-only). Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
+  | `src`  | `!pto.vmi.vreg<L×{ui8|i8}>` | Source lanes to be binned; 8-bit element type is `ui8` or signless `i8` (interpreted as unsigned). |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only) |
+  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Bin counts on top of `acc` (half axis: Bin_N0/N1 pair, or Bin_N0-only). Element type must equal `acc`'s. |
 
-- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
-  verifier rejects any other element type.
+- **datatypes:** Source bin index: `ui8` or signless `i8`. Accumulator / result:
+  `ui16` or signless `i16`. All are interpreted as unsigned; signed types
+  (`si8` / `si16`) are rejected by the verifier. `acc` and `result` must have
+  identical element type — mixing `ui16` and `i16` is rejected.
 - **lowering to `pto.mi`:**
   ```
   chistv2 Bin_N0 + Bin_N1 (two-half fanout) + widen/accumulate
@@ -2056,14 +2072,19 @@ or fusing at the `pto.mi` layer is the workaround.
   %h0 = pto.vmi.vchist %acc0, %src, %mask
       : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
      -> !pto.vmi.vreg<128×ui16>
+
+  // signless i16/i8 also accepted (interpreted as unsigned; acc and result must match)
+  %hs = pto.vmi.vchist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   ```
 
 #### `pto.vmi.vdhist`
 
-- **semantics:** **Distribution histogram** over unsigned 8-bit source
-  lanes. Counts per-bin occurrences over `%src` on top of a carry-in
-  accumulator `%acc`, yielding a plain per-bin count vector (no `half`
-  axis).
+- **semantics:** **Distribution histogram** over 8-bit source lanes
+  (interpreted as unsigned). Counts per-bin occurrences over `%src` on top
+  of a carry-in accumulator `%acc`, yielding a plain per-bin count vector
+  (no `half` axis).
 
   ```c
   // Plain per-bin distribution count
@@ -2076,26 +2097,34 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **syntax:**
   ```mlir
+  // 256-bin full output
   %d = pto.vmi.vdhist %acc, %src, %mask
-      : !pto.vmi.vreg<L×ui16>, !pto.vmi.vreg<L×ui8>, !pto.vmi.mask<L>
-     -> !pto.vmi.vreg<L×ui16>
+      : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×ui16>
+
+  // 128-bin output when the source lanes are known to be < 128
+  %d = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
   ```
 - **operands:**
 
   | Operand | Type | Description |
   |---|---|---|
-  | `acc`  | `!pto.vmi.vreg<L×ui16>` | Carry-in accumulator; same shape as `result`. Element type must be `ui16`. |
-  | `src`  | `!pto.vmi.vreg<L×ui8>` | Source lanes to be binned (unsigned 8-bit). |
+  | `acc`  | `!pto.vmi.vreg<L×{ui16|i16}>` | Carry-in accumulator; same shape as `result` (256-bin full, or 128-bin when the source range is known to be < 128). Element type is `ui16` or signless `i16` (interpreted as unsigned) and must match `result`. |
+  | `src`  | `!pto.vmi.vreg<L×{ui8|i8}>` | Source lanes to be binned; 8-bit element type is `ui8` or signless `i8` (interpreted as unsigned). |
   | `mask` | `!pto.vmi.mask<L>` | Governing predicate over source lanes. Does not gate `acc`. |
 
 - **results:**
 
   | Result | Type | Description |
   |---|---|---|
-  | `result` | `!pto.vmi.vreg<L×T_count>` | Plain per-bin count vector on top of `acc` |
+  | `result` | `!pto.vmi.vreg<L×{ui16|i16}>` | Plain per-bin count vector on top of `acc` (256-bin full, or 128-bin when the source range is known to be < 128). Element type must equal `acc`'s. |
 
-- **datatypes:** Source bin index: `ui8`. Accumulator / result: `ui16`. The
-  verifier rejects any other element type.
+- **datatypes:** Source bin index: `ui8` or signless `i8`. Accumulator / result:
+  `ui16` or signless `i16`. All are interpreted as unsigned; signed types
+  (`si8` / `si16`) are rejected by the verifier. `acc` and `result` must have
+  identical element type — mixing `ui16` and `i16` is rejected.
 - **lowering to `pto.mi`:**
   ```
   distribution histogram accumulate (no half-axis fanout)
@@ -2104,10 +2133,20 @@ or fusing at the `pto.mi` layer is the workaround.
 
 - **example:**
   ```mlir
-  // Distribution histogram, plain per-bin count
+  // Distribution histogram, plain per-bin count (256-bin full)
   %d = pto.vmi.vdhist %acc, %src, %mask
       : !pto.vmi.vreg<256×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
      -> !pto.vmi.vreg<256×ui16>
+
+  // 128-bin output (source lanes known to be < 128)
+  %d0 = pto.vmi.vdhist %acc0, %src, %mask
+      : !pto.vmi.vreg<128×ui16>, !pto.vmi.vreg<256×ui8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<128×ui16>
+
+  // signless i16/i8 also accepted (interpreted as unsigned; acc and result must match)
+  %ds = pto.vmi.vdhist %acc, %src, %mask
+      : !pto.vmi.vreg<256×i16>, !pto.vmi.vreg<256×i8>, !pto.vmi.mask<256>
+     -> !pto.vmi.vreg<256×i16>
   ```
 
 ### 7.3 Gather / Scatter
