@@ -1,5 +1,6 @@
 # PTO Virtual micro Instruction (`pto.vmi`)
 
+- v0.2: TBD
 - v0.1: Doc init. Per-op reference for all `pto.vmi` ops, with syntax,
   semantics, operand tables, lowering notes, and lit-test examples.
 
@@ -734,7 +735,7 @@ declaring the memory access pattern. Default is `"continuous"`.
 
 - **lowering to `pto.mi`:**
   ```
-  1 × pto.vsstb {repeat_stride = 0}  (per physical reg)
+  1 × pto.mi.vsstb {repeat_stride = 0}  (per physical reg)
   ```
   `#mi = K`, `dep = 1`. Structurally 1:1 with `pto.mi.vsstb` at `repeat_stride = 0`
   — one store op per physical register, each governed by the per-reg block mask.
@@ -748,14 +749,14 @@ declaring the memory access pattern. Default is `"continuous"`.
   ```
 
 - **notes:**
-  - `vsstb` is the **named specialization** of `vstore`'s block-stride mode:
+  - `vsstb` is the **alias** of `vstore`'s block-stride mode:
     `vstore ... %block_stride, %mask` and `vsstb ... %block_stride, %mask` denote
     the same access pattern. `vsstb` exists so block-strided tile stores are
     spelled by intent rather than overloaded onto `vstore`'s operand list.
   - The `repeat_stride` field of the underlying `pto.mi.vsstb` hardware control
     word is **not exposed** here; it is fixed to 0. A nonzero repeat stride is not
     expressible on the `pto.vmi` surface (no op carries it).
-  - **A5 stores are predicated.** The mask gates 32B-block participation; an
+  - **Stores are predicated.** The mask gates 32B-block participation; an
     implicit all-active mask is applied when the operand is omitted.
   - Not combinable with `{dist_mode}`, `{group}`, or the `%block_stride` form of
     `vstore` — `vsstb` is mutually exclusive with all other `vstore` access modes.
